@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ZProxy/ZProxy.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ZProxy.Tests/ZProxy.Tests.fsproj" />
+  </Folder>
+</Solution>
