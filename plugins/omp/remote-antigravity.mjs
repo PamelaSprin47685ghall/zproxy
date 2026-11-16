@@ -22,7 +22,7 @@ const CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
 // User-Agent is answered 403 SUBSCRIPTION_REQUIRED even with a licensed account.
 const ANTIGRAVITY_CLIENT_VERSION = "2.31.2";
 const ANTIGRAVITY_CHANGELIST = "1019359392";
-function antigravityUserAgent() {
+export function antigravityUserAgent() {
   const arch = process.arch === "arm64" ? "arm64" : "amd64";
   const os = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
   return `antigravity/hub/${ANTIGRAVITY_CLIENT_VERSION} (aidev_client; os_type=${os}; arch=${arch}; cl=${ANTIGRAVITY_CHANGELIST})`;

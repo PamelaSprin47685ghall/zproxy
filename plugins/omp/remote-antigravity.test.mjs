@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { antigravityModel, createAntigravity } from "./remote-antigravity.mjs";
+import { antigravityModel, antigravityUserAgent, createAntigravity } from "./remote-antigravity.mjs";
 import { createRemoteAccounts } from "./remote-accounts.mjs";
 import { acquireProviderOptIn } from "./remote-opt-in.mjs";
 import { createRemoteGateway } from "./remote.mjs";
@@ -105,7 +105,8 @@ test("uses the selected account's catalog and transfers raw bytes without sendin
   expect(source.seen.sent).toHaveLength(1);
   expect(source.seen.sent[0].url).toBe("https://upstream.invalid/v1internal:streamGenerateContent?alt=sse");
   expect(source.seen.sent[0].headers.get("authorization")).toBe("Bearer fixture-access");
-  expect(source.seen.sent[0].headers.get("user-agent")).toBe("zproxy/AG2API");
+  // The backend gates the product on the official client identity; any other UA is 403.
+  expect(source.seen.sent[0].headers.get("user-agent")).toBe(antigravityUserAgent());
   expect(source.seen.usage[0].usage).toEqual({ input: 4, output: 5, cacheRead: 1, cacheWrite: 0 });
   expect(source.seen.contact).toBe(1);
   expect(source.seen.holds).toBe(0);

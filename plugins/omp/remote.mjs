@@ -175,8 +175,29 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
         prepare: (value, options) => agWorker.prepare(value, options),
         observeTurn: model => routing?.observeTurn?.(model) ?? {} });
     }
+    // A retryable upstream rejection blocks that account in the official pool,
+    // then the same request is scheduled again so another account serves it.
+    const RETRYABLE_UPSTREAM = new Set([401, 403, 429]);
+    const FALLBACK_ATTEMPTS = 3;
+    const routeAntigravity = async (request, peer, scope) => {
+      for (let attempt = 0; attempt < FALLBACK_ATTEMPTS; attempt++) {
+        const response = await antigravity?.(request, scope);
+        if (response === undefined) return undefined;
+        if (response.ok || !RETRYABLE_UPSTREAM.has(response.status)) return response;
+        if (attempt + 1 === FALLBACK_ATTEMPTS) return response;
+        let model;
+        try { const body = await request.clone().json(); model = body?.model ? resolveModel(body.model) : undefined; } catch {}
+        const provider = model?.provider ?? 'google-antigravity';
+        const failure = Object.assign(new Error('The upstream rejected this account: ' + response.status), { status: response.status });
+        try {
+          const session = scope.credentialSessionId(provider, String(model?.id ?? ''));
+          await storage.limits.rotate(provider, session, { error: failure, modelId: model?.id, signal: request.signal });
+        } catch {}
+        try { await response.body?.cancel(); } catch {}
+      }
+    };
     const dispatch = (request, peer, scope) => features.dispatch(request, peer, scope,
-      async (request, peer, scope) => await antigravity?.(request, scope)
+      async (request, peer, scope) => await routeAntigravity(request, peer, scope)
         ?? await passthrough(request, scope) ?? gateway.route(request, peer, scope));
     if (routingFactory) routing = await routingFactory({ config, storage, registry, dispatch, resolveModel });
     else if (config.shimsConfig) {
