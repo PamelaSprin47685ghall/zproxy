@@ -1,0 +1,14 @@
+telemetry = false
+
+[install]
+linker = "hoisted"
+exact = true
+saveTextLockfile = true
+
+[loader]
+".md" = "text"
+".py" = "text"
+".lark" = "text"
+
+[test]
+pathIgnorePatterns = ["vendor/**", "node_modules/**"]

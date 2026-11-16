@@ -3,162 +3,169 @@ namespace ZProxy
 open System
 open System.IO
 open System.Runtime.InteropServices
+open System.Threading
 
 module Zstd =
 
-    [<Struct>]
-    [<StructLayout(LayoutKind.Sequential)>]
-    type ZstdBuffer =
-        val mutable Dst: nativeint
+    [<Literal>]
+    let DefaultWindowLog = 23
+    [<Literal>]
+    let MaxChunkBytes = 65536
+
+    [<Struct; StructLayout(LayoutKind.Sequential)>]
+    type private Buffer =
+        val mutable Pointer: nativeint
         val mutable Size: unativeint
-        val mutable Pos: unativeint
-        new(dst, size, pos) = { Dst = dst; Size = size; Pos = pos }
+        val mutable Position: unativeint
+        new(pointer, size) = { Pointer = pointer; Size = unativeint size; Position = 0un }
 
-    [<Struct>]
-    [<StructLayout(LayoutKind.Sequential)>]
-    type ZstdInBuffer =
-        val mutable Src: nativeint
-        val mutable Size: unativeint
-        val mutable Pos: unativeint
-        new(src, size, pos) = { Src = src; Size = size; Pos = pos }
-
-    type ZstdEndDirective =
-        | ZstdEContinue = 0
-        | ZstdEFlush = 1
-        | ZstdEEnd = 2
-
-    type ZstdCParameter =
-        | ZstdCCompressionLevel = 100
-        | ZstdCWindowLog = 101
-        | ZstdCHashLog = 102
-        | ZstdCChainLog = 103
-
-    type ZstdDParameter =
-        | ZstdDWindowLogMax = 100
-
-    module Native =
+    // The runtime package must supply this Linux library.
+    module private Native =
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_createCStream")>]
-        extern nativeint ZSTD_createCStream()
-
+        extern nativeint createCompressor()
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_freeCStream")>]
-        extern unativeint ZSTD_freeCStream(nativeint cstream)
-
+        extern unativeint freeCompressor(nativeint context)
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_initCStream")>]
-        extern unativeint ZSTD_initCStream(nativeint cstream, int compressionLevel)
-
+        extern unativeint initCompressor(nativeint context, int level)
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_CCtx_setParameter")>]
-        extern unativeint ZSTD_CCtx_setParameter(nativeint cctx, ZstdCParameter param, int value)
-
+        extern unativeint setCompressor(nativeint context, int parameter, int value)
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_compressStream2")>]
-        extern unativeint ZSTD_compressStream2(nativeint cstream, ZstdBuffer& output, ZstdInBuffer& input, ZstdEndDirective endOp)
-
+        extern unativeint compress(nativeint context, Buffer& output, Buffer& input, int operation)
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_createDStream")>]
-        extern nativeint ZSTD_createDStream()
-
+        extern nativeint createDecompressor()
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_freeDStream")>]
-        extern unativeint ZSTD_freeDStream(nativeint dstream)
-
+        extern unativeint freeDecompressor(nativeint context)
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_initDStream")>]
-        extern unativeint ZSTD_initDStream(nativeint dstream)
-
+        extern unativeint initDecompressor(nativeint context)
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_DCtx_setParameter")>]
-        extern unativeint ZSTD_DCtx_setParameter(nativeint dctx, ZstdDParameter param, int value)
-
+        extern unativeint setDecompressor(nativeint context, int parameter, int value)
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_decompressStream")>]
-        extern unativeint ZSTD_decompressStream(nativeint dstream, ZstdBuffer& output, ZstdInBuffer& input)
-
+        extern unativeint decompress(nativeint context, Buffer& output, Buffer& input)
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_isError")>]
-        extern uint32 ZSTD_isError(unativeint code)
-
+        extern uint32 isError(unativeint code)
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_getErrorName")>]
-        extern nativeint ZSTD_getErrorName(unativeint code)
+        extern nativeint errorName(unativeint code)
 
-    let private checkError (code: unativeint) =
-        if Native.ZSTD_isError(code) <> 0u then
-            let ptr = Native.ZSTD_getErrorName(code)
-            let msg = Marshal.PtrToStringAnsi(ptr)
-            failwithf "ZSTD error: %s" msg
+    let private check code =
+        if Native.isError(code) <> 0u then
+            raise (InvalidDataException("Zstd: " + Marshal.PtrToStringAnsi(Native.errorName(code))))
 
-    /// Massive rolling dictionary window (default 256 MiB = 2^28) for preserving multi-agent prompt prefix caches
-    let DefaultWindowLog = 28 // 256 MiB sliding window
+    let private checkWindow name value =
+        if value < 10 || value > 27 then invalidArg name "Window log must be between 10 and 27"
 
-    /// Stateful streaming compressor keeping rolling dictionary/sliding-window across calls.
+    /// One owner uses each context. Flush retains its compression history.
     type StreamingCompressor(level: int, ?windowLog: int) =
-        let cstream = Native.ZSTD_createCStream()
-        let wLog = defaultArg windowLog DefaultWindowLog
+        let gate = obj()
+        let window = defaultArg windowLog DefaultWindowLog
+        let mutable context = 0n
+        let inputBytes = GC.AllocateUninitializedArray<byte>(MaxChunkBytes, pinned = true)
+        let outputBytes = GC.AllocateUninitializedArray<byte>(MaxChunkBytes, pinned = true)
+        let inputPointer = Marshal.UnsafeAddrOfPinnedArrayElement(inputBytes, 0)
+        let outputPointer = Marshal.UnsafeAddrOfPinnedArrayElement(outputBytes, 0)
+        let outputStore = new MemoryStream(MaxChunkBytes)
         do
-            if cstream = 0n then failwith "Failed to allocate ZSTD CStream"
-            Native.ZSTD_initCStream(cstream, level) |> checkError
-            // Set massive 256 MiB sliding window
-            Native.ZSTD_CCtx_setParameter(cstream, ZstdCParameter.ZstdCWindowLog, wLog) |> checkError
+            checkWindow "windowLog" window
+            context <- Native.createCompressor()
+            if context = 0n then raise (OutOfMemoryException("Cannot create Zstd compressor"))
+            try
+                Native.initCompressor(context, level) |> check
+                Native.setCompressor(context, 101, window) |> check
+            with _ ->
+                Native.freeCompressor(context) |> ignore
+                context <- 0n
+                reraise()
 
         member _.CompressChunk(data: ReadOnlySpan<byte>, flush: bool) : byte[] =
-            use ms = new MemoryStream()
-            let outChunk = Array.zeroCreate<byte> 65536
-            let mutable inHandle = GCHandle()
-            let mutable outHandle = GCHandle()
+            if data.Length > MaxChunkBytes then invalidArg "data" "Compression input exceeds 65536 bytes"
+            Monitor.Enter(gate)
             try
-                let dataArr = data.ToArray()
-                inHandle <- GCHandle.Alloc(dataArr, GCHandleType.Pinned)
-                outHandle <- GCHandle.Alloc(outChunk, GCHandleType.Pinned)
-                let mutable input = ZstdInBuffer(inHandle.AddrOfPinnedObject(), unativeint dataArr.Length, 0un)
-                let endOp = if flush then ZstdEndDirective.ZstdEFlush else ZstdEndDirective.ZstdEContinue
-
-                let mutable loop = true
-                while loop do
-                    let mutable output = ZstdBuffer(outHandle.AddrOfPinnedObject(), unativeint outChunk.Length, 0un)
-                    let remaining = Native.ZSTD_compressStream2(cstream, &output, &input, endOp)
-                    checkError remaining
-                    let produced = int output.Pos
-                    if produced > 0 then
-                        ms.Write(outChunk, 0, produced)
-                    if input.Pos >= input.Size && (not flush || remaining = 0un) then
-                        loop <- false
+                ObjectDisposedException.ThrowIf((context = 0n), "Zstd compressor")
+                data.CopyTo(inputBytes.AsSpan())
+                outputStore.SetLength(0L)
+                let mutable input = Buffer(inputPointer, data.Length)
+                let operation = if flush then 1 else 0
+                let mutable doneWriting = false
+                while not doneWriting do
+                    let before = input.Position
+                    let mutable output = Buffer(outputPointer, outputBytes.Length)
+                    let remaining = Native.compress(context, &output, &input, operation)
+                    check remaining
+                    let count = int output.Position
+                    outputStore.Write(outputBytes, 0, count)
+                    if outputStore.Length > int64 (MaxChunkBytes * 2) then
+                        raise (InvalidDataException("Zstd output exceeds the record bound"))
+                    doneWriting <- input.Position = input.Size && (not flush || remaining = 0un)
+                    if not doneWriting && before = input.Position && count = 0 then
+                        raise (InvalidDataException("Zstd compressor made no progress"))
+                outputStore.ToArray()
             finally
-                if inHandle.IsAllocated then inHandle.Free()
-                if outHandle.IsAllocated then outHandle.Free()
-            ms.ToArray()
+                GC.KeepAlive(inputBytes)
+                GC.KeepAlive(outputBytes)
+                Monitor.Exit(gate)
 
         interface IDisposable with
             member _.Dispose() =
-                if cstream <> 0n then
-                    Native.ZSTD_freeCStream(cstream) |> ignore
+                lock gate (fun () ->
+                    if context <> 0n then
+                        Native.freeCompressor(context) |> ignore
+                        context <- 0n
+                        outputStore.Dispose())
 
-    /// Stateful streaming decompressor keeping rolling dictionary/sliding-window across calls.
+    /// Reject large windows before allocation and bound output for each record.
     type StreamingDecompressor(?maxWindowLog: int) =
-        let dstream = Native.ZSTD_createDStream()
-        let wLogMax = defaultArg maxWindowLog 29 // Allow up to 512 MiB window
+        let gate = obj()
+        let window = defaultArg maxWindowLog DefaultWindowLog
+        let mutable context = 0n
+        let inputBytes = GC.AllocateUninitializedArray<byte>(MaxChunkBytes, pinned = true)
+        let outputBytes = GC.AllocateUninitializedArray<byte>(MaxChunkBytes, pinned = true)
+        let inputPointer = Marshal.UnsafeAddrOfPinnedArrayElement(inputBytes, 0)
+        let outputPointer = Marshal.UnsafeAddrOfPinnedArrayElement(outputBytes, 0)
+        let outputStore = new MemoryStream(MaxChunkBytes)
         do
-            if dstream = 0n then failwith "Failed to allocate ZSTD DStream"
-            Native.ZSTD_initDStream(dstream) |> checkError
-            Native.ZSTD_DCtx_setParameter(dstream, ZstdDParameter.ZstdDWindowLogMax, wLogMax) |> checkError
-
-        member _.DecompressChunk(compressed: ReadOnlySpan<byte>) : byte[] =
-            use ms = new MemoryStream()
-            let outChunk = Array.zeroCreate<byte> 65536
-            let mutable inHandle = GCHandle()
-            let mutable outHandle = GCHandle()
+            checkWindow "maxWindowLog" window
+            context <- Native.createDecompressor()
+            if context = 0n then raise (OutOfMemoryException("Cannot create Zstd decompressor"))
             try
-                let compArr = compressed.ToArray()
-                inHandle <- GCHandle.Alloc(compArr, GCHandleType.Pinned)
-                outHandle <- GCHandle.Alloc(outChunk, GCHandleType.Pinned)
-                let mutable input = ZstdInBuffer(inHandle.AddrOfPinnedObject(), unativeint compArr.Length, 0un)
+                Native.initDecompressor(context) |> check
+                Native.setDecompressor(context, 100, window) |> check
+            with _ ->
+                Native.freeDecompressor(context) |> ignore
+                context <- 0n
+                reraise()
 
-                while input.Pos < input.Size do
-                    let mutable output = ZstdBuffer(outHandle.AddrOfPinnedObject(), unativeint outChunk.Length, 0un)
-                    let remaining = Native.ZSTD_decompressStream(dstream, &output, &input)
-                    checkError remaining
-                    let produced = int output.Pos
-                    if produced > 0 then
-                        ms.Write(outChunk, 0, produced)
-                    elif input.Pos = 0un && produced = 0 then
-                        failwith "ZSTD decompressor made no progress"
+        member _.DecompressChunk(compressed: ReadOnlySpan<byte>, ?maxOutputBytes: int) : byte[] =
+            let limit = defaultArg maxOutputBytes MaxChunkBytes
+            if compressed.Length > MaxChunkBytes then invalidArg "compressed" "Record exceeds 65536 bytes"
+            if limit < 1 || limit > MaxChunkBytes then invalidArg "maxOutputBytes" "Output bound must be between 1 and 65536"
+            Monitor.Enter(gate)
+            try
+                ObjectDisposedException.ThrowIf((context = 0n), "Zstd decompressor")
+                compressed.CopyTo(inputBytes.AsSpan())
+                outputStore.SetLength(0L)
+                let mutable input = Buffer(inputPointer, compressed.Length)
+                let mutable readAgain = compressed.Length > 0
+                while readAgain do
+                    let before = input.Position
+                    let capacity = min outputBytes.Length (limit - int outputStore.Length + 1)
+                    let mutable output = Buffer(outputPointer, capacity)
+                    Native.decompress(context, &output, &input) |> check
+                    let count = int output.Position
+                    if outputStore.Length + int64 count > int64 limit then
+                        raise (InvalidDataException("Zstd output exceeds the record bound"))
+                    outputStore.Write(outputBytes, 0, count)
+                    readAgain <- input.Position < input.Size || count = capacity
+                    if readAgain && before = input.Position && count = 0 then
+                        raise (InvalidDataException("Zstd decompressor made no progress"))
+                outputStore.ToArray()
             finally
-                if inHandle.IsAllocated then inHandle.Free()
-                if outHandle.IsAllocated then outHandle.Free()
-            ms.ToArray()
+                GC.KeepAlive(inputBytes)
+                GC.KeepAlive(outputBytes)
+                Monitor.Exit(gate)
 
         interface IDisposable with
             member _.Dispose() =
-                if dstream <> 0n then
-                    Native.ZSTD_freeDStream(dstream) |> ignore
+                lock gate (fun () ->
+                    if context <> 0n then
+                        Native.freeDecompressor(context) |> ignore
+                        context <- 0n
+                        outputStore.Dispose())

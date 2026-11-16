@@ -1,6 +1,10 @@
 bin/
 obj/
 dist/
+artifacts/
+TestResults/
+data/
 *.user
 *.suo
 .DS_Store
+__pycache__/

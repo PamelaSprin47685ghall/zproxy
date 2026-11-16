@@ -2,132 +2,166 @@ namespace ZProxy
 
 open System
 open System.Buffers.Binary
-open System.Collections.Concurrent
+open System.Collections.Generic
 open System.Security.Cryptography
 open System.Text
-open Konscious.Security.Cryptography
 
 module Crypto =
 
-    let MasterDomainSalt = SHA256.HashData("zproxy-v1-master-salt"B) // 32 bytes
-    let InfoKeyC2S = "zproxy-v1-key-c2s"B
-    let InfoKeyS2C = "zproxy-v1-key-s2c"B
-    let DirC2S = [| 0x43uy; 0x32uy; 0x53uy; 0x00uy |] // "C2S\0"
-    let DirS2C = [| 0x53uy; 0x32uy; 0x43uy; 0x00uy |] // "S2C\0"
+    [<Literal>]
+    let MaxChunkBytes = 65536
 
-    /// Derive 32-byte master key from password using Argon2id (m = 64 MiB, t = 3, p = 1)
-    let deriveMasterKey (password: string) : byte[] =
-        let pwdBytes = Encoding.UTF8.GetBytes(password)
-        use argon2 = new Argon2id(pwdBytes)
-        argon2.Salt <- MasterDomainSalt
-        argon2.DegreeOfParallelism <- 1
-        argon2.Iterations <- 3
-        argon2.MemorySize <- 65536 // 64 MiB in KiB
-        argon2.GetBytes(32)
+    let InfoKeyC2S = "zproxy-v4-key-c2s"B
+    let InfoKeyS2C = "zproxy-v4-key-s2c"B
+    let DirC2S = [| 0x43uy; 0x32uy; 0x53uy; 0uy |]
+    let DirS2C = [| 0x53uy; 0x32uy; 0x43uy; 0uy |]
 
-    /// 32-byte connection preamble: 24-byte random salt + 8-byte Unix timestamp ms (BE)
+    type UserCredential =
+        { Selector: byte[]
+          Key: byte[] }
+
+    /// UUIDs are random secrets. Keep public selectors separate from authentication keys.
+    let deriveUserCredential (uuid: string) : UserCredential =
+        let valid, parsed = Guid.TryParseExact(uuid, "D")
+        if not valid || isNull uuid || uuid.Length <> 36 then
+            invalidArg "uuid" "The user credential must be a version 4 UUID."
+        let canonical = parsed.ToString("D")
+        if not (uuid.Equals(canonical, StringComparison.OrdinalIgnoreCase))
+           || canonical[14] <> '4' || "89ab".IndexOf(canonical[19]) < 0 then
+            invalidArg "uuid" "The user credential must be a version 4 UUID."
+        let secret = Encoding.ASCII.GetBytes(canonical)
+        let derive (domain: byte[]) =
+            let input = Array.zeroCreate<byte> (domain.Length + secret.Length)
+            try
+                domain.CopyTo(input, 0)
+                secret.CopyTo(input, domain.Length)
+                SHA256.HashData(input)
+            finally
+                CryptographicOperations.ZeroMemory(input.AsSpan())
+        try
+            { Selector = derive "zproxy-v3-user-selector\000"B
+              Key = derive "zproxy-v3-user-key\000"B }
+        finally
+            CryptographicOperations.ZeroMemory(secret.AsSpan())
+
     [<Struct>]
     type Preamble =
         { Salt: byte[]
           TimestampMs: int64 }
 
     let createPreamble () : byte[] * Preamble =
-        let buf = Array.zeroCreate<byte> 32
-        RandomNumberGenerator.Fill(Span<byte>(buf, 0, 24))
-        let nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-        BinaryPrimitives.WriteInt64BigEndian(Span<byte>(buf, 24, 8), nowMs)
-        let salt = Array.zeroCreate<byte> 24
-        Array.Copy(buf, 0, salt, 0, 24)
-        buf, { Salt = salt; TimestampMs = nowMs }
+        let bytes = Array.zeroCreate<byte> 32
+        RandomNumberGenerator.Fill(bytes.AsSpan(0, 24))
+        let now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        BinaryPrimitives.WriteInt64BigEndian(bytes.AsSpan(24, 8), now)
+        bytes, { Salt = bytes.AsSpan(0, 24).ToArray(); TimestampMs = now }
 
-    let parsePreamble (buf: ReadOnlySpan<byte>) : Result<Preamble, string> =
-        if buf.Length < 32 then
-            Error "Preamble too short"
+    let parsePreamble (bytes: ReadOnlySpan<byte>) : Result<Preamble, string> =
+        if bytes.Length <> 32 then
+            Error "Preamble must contain 32 bytes"
         else
-            let salt = buf.Slice(0, 24).ToArray()
-            let ts = BinaryPrimitives.ReadInt64BigEndian(buf.Slice(24, 8))
-            Ok { Salt = salt; TimestampMs = ts }
+            Ok { Salt = bytes.Slice(0, 24).ToArray()
+                 TimestampMs = BinaryPrimitives.ReadInt64BigEndian(bytes.Slice(24, 8)) }
 
-    /// Replay protection tracker
-    type ReplayFilter(maxAgeMs: int64) =
-        let seen = ConcurrentDictionary<string, int64>()
-        let mutable lastPrune = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+    /// Keep accepted salts for the complete validity interval. A full table rejects new sessions.
+    type ReplayFilter(maxAgeMs: int64, ?maxEntries: int) =
+        let capacity = defaultArg maxEntries 65536
+        let gate = obj()
+        let seen = HashSet<string>(StringComparer.Ordinal)
+        let expiry = Queue<string * int64>()
+        do
+            if maxAgeMs < 1L || maxAgeMs > 86_400_000L then
+                invalidArg "maxAgeMs" "Replay age must be between 1 ms and one day"
+            if capacity < 1 then invalidArg "maxEntries" "Replay capacity must be positive"
 
-        member this.Validate(preamble: Preamble) : bool =
+        member _.Validate(preamble: Preamble) : bool =
             let now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-            if abs (now - preamble.TimestampMs) > maxAgeMs then
+            if isNull preamble.Salt || preamble.Salt.Length <> 24
+               || preamble.TimestampMs < now - maxAgeMs
+               || preamble.TimestampMs > now + maxAgeMs then
                 false
             else
-                let key = Convert.ToHexString(preamble.Salt)
-                if not (seen.TryAdd(key, preamble.TimestampMs)) then
-                    false
-                else
-                    if now - lastPrune > (maxAgeMs * 2L) then
-                        lastPrune <- now
-                        let cutoff = now - maxAgeMs
-                        for kv in seen do
-                            if kv.Value < cutoff then
-                                seen.TryRemove(kv.Key) |> ignore
-                    true
+                lock gate (fun () ->
+                    while expiry.Count > 0 && snd (expiry.Peek()) < now do
+                        let salt, _ = expiry.Dequeue()
+                        seen.Remove(salt) |> ignore
+                    let salt = Convert.ToHexString(preamble.Salt)
+                    if seen.Count >= capacity || not (seen.Add(salt)) then
+                        false
+                    else
+                        expiry.Enqueue(salt, now + 2L * maxAgeMs)
+                        true)
 
-    /// Session directional keys
     type SessionKeys =
         { KeyC2S: byte[]
           KeyS2C: byte[] }
 
-    let deriveSessionKeys (masterKey: byte[]) (preambleBytes: byte[]) : SessionKeys =
-        let prk = HKDF.Extract(HashAlgorithmName.SHA256, masterKey, preambleBytes)
-        let keyC2S = Array.zeroCreate<byte> 32
-        let keyS2C = Array.zeroCreate<byte> 32
-        HKDF.Expand(HashAlgorithmName.SHA256, prk, keyC2S, InfoKeyC2S)
-        HKDF.Expand(HashAlgorithmName.SHA256, prk, keyS2C, InfoKeyS2C)
-        { KeyC2S = keyC2S; KeyS2C = keyS2C }
+    let deriveSessionKeys (userKey: byte[]) (preambleBytes: byte[]) : SessionKeys =
+        if isNull userKey || userKey.Length <> 32 then
+            invalidArg "userKey" "User key must contain 32 bytes"
+        if isNull preambleBytes || preambleBytes.Length <> 32 then
+            invalidArg "preambleBytes" "Preamble must contain 32 bytes"
+        let prk = HKDF.Extract(HashAlgorithmName.SHA256, userKey, preambleBytes)
+        try
+            { KeyC2S = HKDF.Expand(HashAlgorithmName.SHA256, prk, 32, InfoKeyC2S)
+              KeyS2C = HKDF.Expand(HashAlgorithmName.SHA256, prk, 32, InfoKeyS2C) }
+        finally
+            CryptographicOperations.ZeroMemory(prk.AsSpan())
 
-    /// Build 12-byte nonce: 4-byte direction + 8-byte big-endian sequence
-    let makeNonce (dir: byte[]) (seq: uint64) : byte[] =
+    let makeNonce (direction: byte[]) (sequence: uint64) : byte[] =
+        if isNull direction || direction.Length <> 4 then
+            invalidArg "direction" "Direction must contain four bytes"
         let nonce = Array.zeroCreate<byte> 12
-        Array.Copy(dir, 0, nonce, 0, 4)
-        BinaryPrimitives.WriteUInt64BigEndian(Span<byte>(nonce, 4, 8), seq)
+        direction.CopyTo(nonce, 0)
+        BinaryPrimitives.WriteUInt64BigEndian(nonce.AsSpan(4, 8), sequence)
         nonce
 
-    /// Compute specification AAD: For chunk 0: Preamble (32B) || PlaintextLen (3B BE); For chunk >0: PlaintextLen (3B BE)
-    let makeAad (preambleBytes: byte[]) (seq: uint64) (lenBytes: byte[]) : byte[] =
-        if seq = 0UL then
-            let aad = Array.zeroCreate<byte> (32 + 3)
-            Array.Copy(preambleBytes, 0, aad, 0, 32)
-            Array.Copy(lenBytes, 0, aad, 32, 3)
+    let makeAad (preambleBytes: byte[]) (sequence: uint64) (lengthBytes: byte[]) : byte[] =
+        if isNull preambleBytes || preambleBytes.Length <> 32 then
+            invalidArg "preambleBytes" "Preamble must contain 32 bytes"
+        if isNull lengthBytes || lengthBytes.Length <> 3 then
+            invalidArg "lengthBytes" "Record length must contain three bytes"
+        if sequence = 0UL then
+            let aad = Array.zeroCreate<byte> 35
+            preambleBytes.CopyTo(aad, 0)
+            lengthBytes.CopyTo(aad, 32)
             aad
         else
-            lenBytes
+            lengthBytes
 
-    /// Seal chunk: [PlaintextLen (3B BE)][Ciphertext][Poly1305 Tag (16B)]
-    let sealChunk (aead: ChaCha20Poly1305) (dir: byte[]) (seq: uint64) (preambleBytes: byte[]) (plaintext: ReadOnlySpan<byte>) : byte[] =
-        let len = plaintext.Length
-        if len > 65536 then invalidArg "plaintext" "Chunk exceeds 64 KiB"
-        let lenBytes = [| byte ((len >>> 16) &&& 0xFF); byte ((len >>> 8) &&& 0xFF); byte (len &&& 0xFF) |]
-        let outBuf = Array.zeroCreate<byte> (3 + len + 16)
-        Array.Copy(lenBytes, 0, outBuf, 0, 3)
+    let sealChunk (aead: ChaCha20Poly1305) (direction: byte[]) (sequence: uint64)
+                  (preambleBytes: byte[]) (plaintext: ReadOnlySpan<byte>) : byte[] =
+        let length = plaintext.Length
+        if length < 1 || length > MaxChunkBytes then
+            invalidArg "plaintext" "Record length must be between 1 and 65536 bytes"
+        let lengthBytes = [| byte (length >>> 16); byte (length >>> 8); byte length |]
+        let bytes = Array.zeroCreate<byte> (3 + length + 16)
+        lengthBytes.CopyTo(bytes, 0)
+        let nonce = makeNonce direction sequence
+        let aad = makeAad preambleBytes sequence lengthBytes
+        aead.Encrypt(nonce, plaintext, bytes.AsSpan(3, length), bytes.AsSpan(3 + length, 16), aad)
+        bytes
 
-        let nonce = makeNonce dir seq
-        let aad = makeAad preambleBytes seq lenBytes
-        let ctSpan = Span<byte>(outBuf, 3, len)
-        let tagSpan = Span<byte>(outBuf, 3 + len, 16)
-        aead.Encrypt(ReadOnlySpan<byte>(nonce), plaintext, ctSpan, tagSpan, ReadOnlySpan<byte>(aad))
-        outBuf
-
-    /// Open chunk
-    let openChunk (aead: ChaCha20Poly1305) (dir: byte[]) (seq: uint64) (preambleBytes: byte[]) (lenBytes: byte[]) (ciphertextWithTag: ReadOnlySpan<byte>) : Result<byte[], string> =
-        if ciphertextWithTag.Length < 16 then
-            Error "Ciphertext too short for AEAD tag"
+    let openChunk (aead: ChaCha20Poly1305) (direction: byte[]) (sequence: uint64)
+                  (preambleBytes: byte[]) (lengthBytes: byte[])
+                  (ciphertextWithTag: ReadOnlySpan<byte>) : Result<byte[], string> =
+        if isNull lengthBytes || lengthBytes.Length <> 3 then
+            Error "Record length must contain three bytes"
+        elif isNull direction || direction.Length <> 4
+             || isNull preambleBytes || preambleBytes.Length <> 32 then
+            Error "Invalid record context"
         else
-            let ptLen = ciphertextWithTag.Length - 16
-            let ct = ciphertextWithTag.Slice(0, ptLen)
-            let tag = ciphertextWithTag.Slice(ptLen, 16)
-            let nonce = makeNonce dir seq
-            let aad = makeAad preambleBytes seq lenBytes
-            let plaintext = Array.zeroCreate<byte> ptLen
-            try
-                aead.Decrypt(ReadOnlySpan<byte>(nonce), ct, tag, Span<byte>(plaintext), ReadOnlySpan<byte>(aad))
-                Ok plaintext
-            with _ ->
-                Error "AEAD tag verification failed"
+            let length = (int lengthBytes[0] <<< 16) ||| (int lengthBytes[1] <<< 8) ||| int lengthBytes[2]
+            if length < 1 || length > MaxChunkBytes || ciphertextWithTag.Length <> length + 16 then
+                Error "Invalid record length"
+            else
+                let plaintext = Array.zeroCreate<byte> length
+                try
+                    let nonce = makeNonce direction sequence
+                    let aad = makeAad preambleBytes sequence lengthBytes
+                    aead.Decrypt(nonce, ciphertextWithTag.Slice(0, length),
+                                 ciphertextWithTag.Slice(length, 16), plaintext, aad)
+                    Ok plaintext
+                with :? CryptographicException ->
+                    CryptographicOperations.ZeroMemory(plaintext.AsSpan())
+                    Error "Record authentication failed"

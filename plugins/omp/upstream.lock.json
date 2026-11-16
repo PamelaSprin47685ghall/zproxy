@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "upstream": {
+    "repository": "https://github.com/can1357/oh-my-pi.git",
+    "commit": "67ef5342de6c24587fc59a6dbd3a2ab918510541",
+    "version": "18.20.3",
+    "packages": [
+      "stats",
+      "omptype",
+      "agent",
+      "ai",
+      "catalog",
+      "coding-agent",
+      "mnemopi",
+      "natives",
+      "tui",
+      "utils",
+      "wire",
+      "snapcompact"
+    ]
+  },
+  "bun": {
+    "version": "1.4.4",
+    "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64-baseline.zip",
+    "sha256": "e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76"
+  },
+  "ag2api": {
+    "repository": "https://github.com/Mag1cFall/Antigravity2API.git",
+    "commit": "d36920f3e178eb6d94a49c0b184947cb7df8b3b1",
+    "version": "0.1.8",
+    "goModSha256": "b9622326f42f1a7d54c646e23f4f7c12570cdf3673ff6c6a9293e401501f2440",
+    "goSumSha256": "cea27ea3e877673651c332ca73699adc1d0cfef1e5d81a0005a9d3b8cab473df",
+    "licenseSha256": "cca76be3b407663a238f51fa8d7740ef8be53fa2d18a99c27d7997c9c0a801e4"
+  },
+  "go": {
+    "version": "1.27.4",
+    "url": "https://go.dev/dl/go1.27.4.linux-amd64.tar.gz",
+    "sha256": "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840"
+  },
+  "shims": {
+    "repository": "https://github.com/PamelaSprin47685ghall/omp-shims.git",
+    "commit": "34189f420516f5ceeb8373998cc31896553c57ea",
+    "version": "2.0.0",
+    "paths": [
+      "LICENSE",
+      "README.md",
+      "package.json",
+      "bun.lock",
+      "bunfig.toml",
+      "index.mjs",
+      "preload.mjs",
+      "registry-capture.mjs",
+      "antigravity-unpause.mjs",
+      "lib",
+      "features",
+      "presets",
+      "vendor"
+    ]
+  },
+  "bunLicense": {
+    "url": "https://raw.githubusercontent.com/oven-sh/bun/bun-v1.4.4/LICENSE.md",
+    "sha256": "362fe32c954ec829240bd7429c53d705eef08c6bfa45ffc2d02005f857cba4dd"
+  },
+  "native": {
+    "package": "@oh-my-pi/pi-natives-linux-x64",
+    "version": "18.20.3",
+    "integrity": "sha512-6n+LTmff5CDSgliP4FC6iQG12HI3vc/LpcM51ZiYIHnDn5Iu7Hn+mnrHnhWOh3GzVVjVR+vt5M9/CY89Ntd76w=="
+  },
+  "appImageTool": {
+    "version": "1.9.1",
+    "url": "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage",
+    "sha256": "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+  },
+  "appImageRuntime": {
+    "version": "20251108",
+    "commit": "dd6cebedcbddde9c82f89b011e8e1d40b6e43868",
+    "url": "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64",
+    "sha256": "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
+  },
+  "appImageRuntimeLicense": {
+    "url": "https://raw.githubusercontent.com/AppImage/type2-runtime/dd6cebedcbddde9c82f89b011e8e1d40b6e43868/LICENSE",
+    "sha256": "aa154fc9070614bbe7921f89db11efd1dba7a1f3a41685958110e2230f9c0ca1"
+  }
+}
