@@ -315,23 +315,23 @@ export function createRawHandoff({ descriptorFor, serializeRecipe, chooseFetch =
       ]);
       if (!outcome.raw) {
         await finish();
-    const terminal = outcome.terminal;
-    if (terminal && !terminal.error && terminal.stopReason !== "error" && terminal.stopReason !== "aborted" && Array.isArray(terminal.content)) {
-      const text = terminal.content.filter(part => part.type === "text").map(part => part.text).join("");
-      const model = turn.model.id;
-      const usage = { prompt_tokens: terminal.usage?.input ?? 0, completion_tokens: terminal.usage?.output ?? 0, total_tokens: terminal.usage?.totalTokens ?? 0 };
-      const id = "chatcmpl-" + randomUUID().replaceAll("-", "");
-      const created = Math.floor(Date.now() / 1000);
-      const finishReason = terminal.stopReason === "length" ? "length" : terminal.stopReason === "toolUse" ? "tool_calls" : "stop";
-      if (turn.parsed.stream) {
-        const frame = payload => "data: " + JSON.stringify(payload) + "\n\n";
-        const body = frame({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }] })
-          + frame({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage })
-          + "data: [DONE]\n\n";
-        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
-      }
-      return Response.json({ id, object: "chat.completion", created, model, choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: finishReason }], usage }, { status: 200 });
-    }
+        const terminal = outcome.terminal;
+        if (terminal && !terminal.error && terminal.stopReason !== "error" && terminal.stopReason !== "aborted" && Array.isArray(terminal.content)) {
+          const text = terminal.content.filter(part => part.type === "text").map(part => part.text).join("");
+          const model = turn.model.id;
+          const usage = { prompt_tokens: terminal.usage?.input ?? 0, completion_tokens: terminal.usage?.output ?? 0, total_tokens: terminal.usage?.totalTokens ?? 0 };
+          const id = "chatcmpl-" + randomUUID().replaceAll("-", "");
+          const created = Math.floor(Date.now() / 1000);
+          const finishReason = terminal.stopReason === "length" ? "length" : terminal.stopReason === "toolUse" ? "tool_calls" : "stop";
+          if (turn.parsed.stream) {
+            const frame = payload => "data: " + JSON.stringify(payload) + "\n\n";
+            const body = frame({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }] })
+              + frame({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage })
+              + "data: [DONE]\n\n";
+            return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+          }
+          return Response.json({ id, object: "chat.completion", created, model, choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: finishReason }], usage }, { status: 200 });
+        }
         const { type = "upstream_error", ...init } = lastFailure ?? { status: 502 };
         return Response.json({ error: { type, message: "The upstream request failed before a response was transferred." } }, init);
       }
