@@ -191,7 +191,7 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
         const failure = Object.assign(new Error('The upstream rejected this account: ' + response.status), { status: response.status });
         try {
           const session = scope.credentialSessionId(provider, String(model?.id ?? ''));
-          await storage.limits.rotate(provider, session, { error: failure, modelId: model?.id, signal: request.signal });
+          await storage.limits.rotate(provider, session, { error: failure, modelId: model?.id, signal: request.signal, waitForSibling: false });
         } catch {}
         try { await response.body?.cancel(); } catch {}
       }
