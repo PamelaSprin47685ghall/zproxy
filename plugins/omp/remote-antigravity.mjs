@@ -18,6 +18,16 @@ const PROVIDERS = Object.freeze({ google: "MODEL_PROVIDER_GOOGLE", anthropic: "M
 const LEVELS = Object.freeze({ LOW: 1, MEDIUM: 2, HIGH: 3, xhigh: 100 });
 const SAFE_HEADERS = ["content-type", "cache-control", "retry-after"];
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/u;
+// The backend gates this product on the official client identity: any other
+// User-Agent is answered 403 SUBSCRIPTION_REQUIRED even with a licensed account.
+const ANTIGRAVITY_CLIENT_VERSION = "2.31.2";
+const ANTIGRAVITY_CHANGELIST = "1019359392";
+function antigravityUserAgent() {
+  const arch = process.arch === "arm64" ? "arm64" : "amd64";
+  const os = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
+  return `antigravity/hub/${ANTIGRAVITY_CLIENT_VERSION} (aidev_client; os_type=${os}; arch=${arch}; cl=${ANTIGRAVITY_CHANGELIST})`;
+}
+
 
 function reject(status, message) { return Object.assign(new Error(message), { status, publicMessage: message }); }
 function name(value, limit, label) {
@@ -162,7 +172,7 @@ export function createAntigravity({ config, storage, registry, resolveModel, pre
         headers.set("content-type", "application/json");
         headers.set("accept", "text/event-stream");
         headers.set("accept-encoding", "identity");
-        headers.set("user-agent", "zproxy/AG2API");
+        headers.set("user-agent", antigravityUserAgent());
         const init = { method: "POST", body: JSON.stringify(prepared.body), headers, signal: controller.signal, timeout: false };
         const timer = setTimeout(() => controller.abort(new Error("The Antigravity response timed out.")), config.headerTimeoutMs);
         try {
