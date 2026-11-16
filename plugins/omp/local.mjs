@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { decodeUpstream, errorResponse, finishBody, jsonResponse } from "./local-codec.mjs";
 import { parseRecipe } from "./contract.mjs";
 import { createAgWorker } from "./ag-worker.mjs";
+import { ipcResponse } from "./ipc-response.mjs";
 
 const MAX_ENVELOPE = 65536;
 const MAX_REQUEST = 64 * 1024 * 1024;
@@ -101,43 +102,44 @@ export async function startLocal(socket, { reasoningOrder = false, onShutdown, a
     await ag.close();
     onShutdown?.(failed === true);
   };
+  const handle = async request => {
+    const path = new URL(request.url).pathname;
+    if (request.method === "GET" && path === "/health") return jsonResponse({ ok: true, decoder: "omp-response", version: 1 });
+    if (request.method === "POST" && path === "/shutdown") {
+      setTimeout(() => { void stop(false); }, 10).unref();
+      return jsonResponse({ ok: true });
+    }
+    if (request.method === "POST" && path === "/request") {
+      if (stopping) return errorResponse("The local codec is stopping.", 503);
+      if (!ag.started) return new Response(request.body, { headers: { "content-type": "application/json" } });
+      try { return await ag.augment(request.body, request.signal); }
+      catch { return errorResponse("The Antigravity request context could not be restored.", 502); }
+    }
+    if (request.method !== "POST" || path !== "/decode") return errorResponse("Unknown local decoder route.", 404);
+    if (stopping) return errorResponse("The local OMP parser is stopping.", 503);
+    let counted = false;
+    let released = false;
+    const release = () => { if (!released) { released = true; if (counted) active--; } };
+    let decode;
+    try {
+      decode = await readDecodeRequest(request);
+      const isAg = parseRecipe(decode.recipe).api === "antigravity2api";
+      if (!isAg && active >= MAX_ACTIVE) {
+        await decode.body.cancel();
+        return errorResponse("The local OMP parser is busy.", 503);
+      }
+      if (!isAg) { active++; counted = true; }
+      const response = isAg ? await ag.decode(decode, reasoningOrder) : await decodeUpstream({ ...decode, reasoningOrder });
+      return new Response(finishBody(response.body, release), { status: response.status, headers: response.headers });
+    } catch (error) {
+      release();
+      await decode?.body.cancel(error).catch(() => {});
+      return errorResponse(error instanceof Error ? error.message : "The response could not be decoded.", 400);
+    }
+  };
   const server = Bun.serve({
     unix: socket, idleTimeout: 0, maxRequestBodySize: MAX_REQUEST + MAX_ENVELOPE + 128 * 1024 * 1024 + 4,
-    async fetch(request) {
-      const path = new URL(request.url).pathname;
-      if (request.method === "GET" && path === "/health") return jsonResponse({ ok: true, decoder: "omp-response", version: 1 });
-      if (request.method === "POST" && path === "/shutdown") {
-        setTimeout(() => { void stop(false); }, 10).unref();
-        return jsonResponse({ ok: true });
-      }
-      if (request.method === "POST" && path === "/request") {
-        if (stopping) return errorResponse("The local codec is stopping.", 503);
-        if (!ag.started) return new Response(request.body, { headers: { "content-type": "application/json" } });
-        try { return await ag.augment(request.body, request.signal); }
-        catch { return errorResponse("The Antigravity request context could not be restored.", 502); }
-      }
-      if (request.method !== "POST" || path !== "/decode") return errorResponse("Unknown local decoder route.", 404);
-      if (stopping) return errorResponse("The local OMP parser is stopping.", 503);
-      let counted = false;
-      let released = false;
-      const release = () => { if (!released) { released = true; if (counted) active--; } };
-      let decode;
-      try {
-        decode = await readDecodeRequest(request);
-        const isAg = parseRecipe(decode.recipe).api === "antigravity2api";
-        if (!isAg && active >= MAX_ACTIVE) {
-          await decode.body.cancel();
-          return errorResponse("The local OMP parser is busy.", 503);
-        }
-        if (!isAg) { active++; counted = true; }
-        const response = isAg ? await ag.decode(decode, reasoningOrder) : await decodeUpstream({ ...decode, reasoningOrder });
-        return new Response(finishBody(response.body, release), { status: response.status, headers: response.headers });
-      } catch (error) {
-        release();
-        await decode?.body.cancel(error).catch(() => {});
-        return errorResponse(error instanceof Error ? error.message : "The response could not be decoded.", 400);
-      }
-    },
+    fetch: async request => ipcResponse(await handle(request)),
   });
   await chmod(socket, 0o600);
   return { stop() { void stop(false); }, close: () => stop(false) };

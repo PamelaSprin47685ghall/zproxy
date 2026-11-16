@@ -18,6 +18,7 @@ import { createRemoteFeatures, getWireInfo } from "./remote-features.mjs";
 import { createPassthrough } from "./remote-passthrough.mjs";
 import { createAgWorker } from "./ag-worker.mjs";
 import { acquireProviderOptIn } from "./remote-opt-in.mjs";
+import { ipcResponse } from "./ipc-response.mjs";
 
 const PATHS = new Set(["/v1/chat/completions", "/v1/completions"]);
 const HEADER_NAMES = ["content-type", "cache-control", "retry-after", "x-zproxy-decode"];
@@ -105,27 +106,9 @@ export function userScope(headers) {
   };
 }
 
-// A stream body prevents Bun from adding Content-Length on the private IPC connection.
+// Keep the private response header allowlist while forcing chunked IPC output.
 export function chunkedResponse(response) {
-  const headers = new Headers();
-  for (const name of HEADER_NAMES) if (response.headers.has(name)) headers.set(name, response.headers.get(name));
-  const reader = response.body?.getReader();
-  let closed = false;
-  return new Response(new ReadableStream({
-    async pull(controller) {
-      if (closed) return;
-      try {
-        const item = reader ? await reader.read() : { done: true };
-        if (item.done) { closed = true; reader?.releaseLock(); controller.close(); }
-        else controller.enqueue(item.value);
-      } catch (error) { closed = true; try { reader?.releaseLock(); } catch {} controller.error(error); }
-    },
-    async cancel(reason) {
-      if (closed) return;
-      closed = true;
-      try { await reader?.cancel(reason); } finally { reader?.releaseLock(); }
-    },
-  }), { status: response.status, headers });
+  return ipcResponse(response, HEADER_NAMES);
 }
 
 export async function createRemoteGateway(input, { fetch: testFetch, routingFactory, agWorker: suppliedAgWorker, onWorkerExit } = {}) {

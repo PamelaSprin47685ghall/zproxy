@@ -85,6 +85,7 @@
   "files": [
     "ag-worker.mjs",
     "contract.mjs",
+    "ipc-response.mjs",
     "local-codec.mjs",
     "local.mjs",
     "patch-shims.mjs",

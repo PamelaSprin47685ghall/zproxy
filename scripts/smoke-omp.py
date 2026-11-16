@@ -300,7 +300,12 @@ def run(binary, omp_dir, timeout, antigravity=False):
                     with contextlib.closing(http.client.HTTPConnection("127.0.0.1", client_port, timeout=remaining(30))) as concurrent:
                         concurrent.request("POST", "/v1/completions", legacy_bytes, caller_headers)
                         probe = concurrent.getresponse()
-                        require(probe.status == 200, "The concurrent legacy completion failed.")
+                        if probe.status != 200:
+                            detail = probe.read(4096).decode(errors="replace")
+                            for secret in (password, provider_key, caller_key, user_uuid):
+                                if secret:
+                                    detail = detail.replace(secret, "[redacted]")
+                            raise RuntimeError(f"The concurrent legacy completion failed: HTTP {probe.status}, {detail}")
                         safe_headers(probe)
                         value = json.loads(probe.read(65537))
                         require(value["object"] == "text_completion" and value["choices"][0]["text"] == "legacy-result", "The local legacy response conversion failed.")
@@ -363,6 +368,7 @@ def run(binary, omp_dir, timeout, antigravity=False):
                   + "usage, nickname reports, raw-byte accounting, and worker cleanup.")
         except Exception:
             print("Phase:", phase)
+            print("Origin legacy requests started:", legacy_started[0], "of", legacy_count)
             for log in logs:
                 content = log.read_text(errors="replace")[-8000:]
                 for secret in (password, provider_key, caller_key, user_uuid):
