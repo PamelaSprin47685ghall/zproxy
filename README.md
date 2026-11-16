@@ -148,7 +148,7 @@ curl --no-buffer 'http://127.0.0.1:18080/v1/chat/completions' \
 
 ### 远端配置
 
-先用官方 OMP 在服务器完成账户登录，或准备服务器上的官方 `models.yml`。把 `authDatabase` 指向该 OMP 使用的 `agent.db`。完整字段示例见 [remote.example.json](plugins/omp/remote.example.json)。例如，在远端保存 `remote.json`：
+先用官方 OMP 在服务器完成账户登录，或准备服务器上的官方 `models.yml`。把 `authDatabase` 指向该 OMP 使用的 `agent.db`。可修改的配置示例见 [remote.example.json](plugins/omp/remote.example.json)。例如，在远端保存 `remote.json`：
 
 ```json
 {

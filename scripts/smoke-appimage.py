@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,11 +26,15 @@ def main():
         launcher = appdir / "AppRun"
         bun = appdir / "usr/bin/bun"
         plugin = appdir / "usr/lib/zproxy/omp"
+        commands = working / "commands"
+        commands.mkdir()
+        # AppRun needs dirname. No host Bun or dotnet command is available.
+        (commands / "dirname").symlink_to(Path(shutil.which("dirname")).resolve())
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("DOTNET_", "ZPROXY_", "BUN_", "PI_"))
                        and key not in ("APPDIR", "LD_LIBRARY_PATH", "NODE_PATH")}
         environment.update({
-            "PATH": "/usr/bin:/bin",
+            "PATH": str(commands),
             "PI_CODING_AGENT_DIR": str(working / "empty-omp-config"),
             "LD_LIBRARY_PATH": str(appdir / "usr/lib/zproxy/lib"),
         })

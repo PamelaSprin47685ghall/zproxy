@@ -82,6 +82,26 @@
     "@oh-my-pi/pi-coding-agent": "workspace:*",
     "@oh-my-pi/pi-natives-linux-x64": "18.20.3"
   },
+  "files": [
+    "contract.mjs",
+    "local-codec.mjs",
+    "local.mjs",
+    "patch-shims.mjs",
+    "patch-upstream.mjs",
+    "remote-accounts.mjs",
+    "remote-features.mjs",
+    "remote-google.mjs",
+    "remote-handoff.mjs",
+    "remote-passthrough.mjs",
+    "remote-routing.mjs",
+    "remote.mjs",
+    "package.json",
+    "bun.lock",
+    "bunfig.toml",
+    "upstream.lock.json",
+    "vendor",
+    "node_modules"
+  ],
   "scripts": {
     "test": "./bin/bun test ./*.test.mjs --timeout 30000"
   }

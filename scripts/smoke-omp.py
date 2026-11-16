@@ -51,6 +51,7 @@ def run(binary, omp_dir, timeout):
     user_uuid = ""
     nickname = "OMP smoke 用户"
     release = threading.Event()
+    finish_stream = threading.Event()
     origin_finished = threading.Event()
     failures = queue.Queue()
     raw_bytes = [0]
@@ -129,6 +130,7 @@ def run(binary, omp_dir, timeout):
                     self.chunk(first)
                     require(release.wait(remaining(30)), "Parsed reasoning did not reach the caller before upstream EOF.")
                     self.chunk(visible)
+                    require(finish_stream.wait(remaining(30)), "Parsed visible text did not reach the caller before upstream EOF.")
                 self.chunk(terminal)
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
@@ -253,6 +255,13 @@ def run(binary, omp_dir, timeout):
                     require(value["object"] == "text_completion" and value["choices"][0]["text"] == "legacy-result", "The local legacy response conversion failed.")
                     require(value["usage"]["total_tokens"] == 8, "The local parser lost usage.")
                 release.set()
+                phase = "receiving locally parsed visible text before upstream EOF"
+                while b"converted-visible" not in received:
+                    line = response.readline(65537)
+                    require(line and len(received) + len(line) <= 65536, "No bounded visible event arrived.")
+                    received.extend(line)
+                require(not origin_finished.is_set(), "Visible text was buffered until upstream EOF.")
+                finish_stream.set()
                 phase = "finishing the decoded SSE response"
                 received.extend(response.read(1048577))
                 require(len(received) <= 1048576 and b"converted-visible" in received and b"data: [DONE]" in received, "The decoded response did not finish.")
@@ -291,6 +300,7 @@ def run(binary, omp_dir, timeout):
             raise
         finally:
             release.set()
+            finish_stream.set()
             for process in reversed(processes):
                 stop(process)
             origin.shutdown()

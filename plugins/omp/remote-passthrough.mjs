@@ -54,9 +54,9 @@ export function createPassthrough({ config, storage, registry, resolveModel, fet
     const json = JSON.stringify(outgoing);
     let failure;
     try {
-      const configuredHeaders = await registry.resolveModelHeaders(model, controller.signal);
       const fetch = transportFetch(model, baseFetch);
       const response = await withAuth(resolver, async apiKey => {
+        const configuredHeaders = await registry.resolveModelHeaders(model, controller.signal);
         const headers = new Headers(configuredHeaders);
         for (const name of ["host", "connection", "content-length", "content-encoding", "transfer-encoding"]) headers.delete(name);
         headers.set("content-type", "application/json");

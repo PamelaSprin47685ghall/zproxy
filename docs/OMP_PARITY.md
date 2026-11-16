@@ -59,7 +59,7 @@
 
 回退维持上游可用性，但对应请求的解析 CPU 和内存仍在远端。它不构成“所有 provider 都已卸载到本地”的承诺。官方自己明确说明 Bedrock AWS SDK、Cursor HTTP/2 等 transport 不经过 `StreamOptions.fetch`。[官方 fetch 接口说明](https://github.com/can1357/oh-my-pi/blob/67ef5342de6c24587fc59a6dbd3a2ab918510541/packages/ai/src/types.ts)
 
-同协议直通由管理员显式列出 provider。它跳过模型响应的语义转换，仍保留服务端凭据解析、认证重试、usage 观察和统计。内建 provider、OAuth 账户、自定义 transport 以及旧文本 completions 不走这条捷径，避免绕过它们需要的官方请求处理。[同协议直通](../plugins/omp/remote-passthrough.mjs)
+同协议直通由管理员在 `passthroughProviders` 显式列出 `models.yml` 自定义 provider。模型必须使用 `openai-completions`，以 API key 认证或明确配置 `auth: "none"`。它跳过模型响应的语义转换，仍保留服务端凭据解析、认证重试、usage 观察和统计。请求保留原 tool-call ID，响应保留原字节和上游 `model` 值，不改成公开别名。内建 provider 定义、OAuth 账户池、自定义插件 transport 以及旧文本 completions 不走这条捷径，避免绕过它们需要的官方请求处理。[同协议直通](../plugins/omp/remote-passthrough.mjs)
 
 本地解析使用一次性的 Response 回放接口：官方解析器只可消费提供的这一份响应。它拿不到上游地址和凭据，不能发起重试，也不能访问网络。调用方原请求只用于 OpenAI 选项、工具定义、请求模型别名和工具 ID 恢复；供官方请求构造器运行的占位内容不会发到任何上游。[本地解析实现](../plugins/omp/local-codec.mjs)
 

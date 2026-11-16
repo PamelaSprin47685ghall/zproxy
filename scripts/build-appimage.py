@@ -112,11 +112,14 @@ def required_glibc(binaries):
 
 def copy_plugin(destination):
     # Root configuration and databases are runtime inputs, never bundle inputs.
+    included = set(json.loads((PLUGIN / "package.json").read_text())["files"])
+    for name in included:
+        if "/" in name or name in (".", "..") or not (PLUGIN / name).exists():
+            raise RuntimeError(f"Invalid or missing runtime package entry: {name}")
+
     def ignored(directory, names):
         ignored_names = {".git", ".cache", "__pycache__"}
         if Path(directory) == PLUGIN:
-            included = {"package.json", "bun.lock", "bunfig.toml", "upstream.lock.json", "vendor", "node_modules"}
-            included.update(name for name in names if name.endswith(".mjs") and not name.endswith(".test.mjs"))
             ignored_names.update(set(names) - included)
         return ignored_names.intersection(names)
 

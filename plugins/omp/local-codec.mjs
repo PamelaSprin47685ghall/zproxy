@@ -47,6 +47,7 @@ function responseBody(source, controller, limit) {
   let released = false;
   const stop = () => { void reader.cancel(controller.signal.reason).catch(() => {}); };
   controller.signal.addEventListener("abort", stop, { once: true });
+  if (controller.signal.aborted) stop();
   const cleanup = () => {
     if (released) return;
     released = true;
@@ -243,7 +244,9 @@ export async function decodeUpstream({ path, request, recipe: recipeText, body, 
       return jsonResponse(path === "/v1/completions" ? legacyResponse(encoded) : encoded);
     }
     let encoded = encodeStream(orderedEvents(events, mapping, reasoningOrder, maxVisibleBytes), parsed.modelId, parsed.options, {
-      signal, onCancel: reason => controller.abort(reason),
+      // Input cancellation must still let the parser's terminal error close
+      // the output. Only output cancellation stops the encoder itself.
+      onCancel: reason => controller.abort(reason),
     });
     if (path === "/v1/completions") encoded = legacyStream(encoded);
     return new Response(finishBody(encoded, finish), { headers: {

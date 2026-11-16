@@ -148,6 +148,36 @@ describe("the credential-free local OMP adapter", () => {
     expect(await cancelled.promise).toBe(true);
   });
 
+  test("an input abort cancels the source and closes the output with an error", async () => {
+    const controller = new AbortController();
+    let cancelled = false;
+    const source = new ReadableStream({ cancel() { cancelled = true; } });
+    const response = await raw("openai-completions", "", { ...chatRequest, stream: true }, { body: source, signal: controller.signal });
+    const reader = response.body.getReader();
+    try {
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain('"role":"assistant"');
+      controller.abort(new Error("Fixture input cancelled."));
+      let text = "";
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        text += new TextDecoder().decode(next.value);
+      }
+      expect(text).toContain('"error"');
+      expect(cancelled).toBe(true);
+    } finally { await reader.cancel(); }
+  }, 1000);
+
+  test("a signal aborted before decoding still cancels the raw source", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("Fixture input already cancelled."));
+    let cancelled = false;
+    const source = new ReadableStream({ cancel() { cancelled = true; } });
+    const response = await raw("openai-completions", "", { ...chatRequest, stream: true }, { body: source, signal: controller.signal });
+    expect(await response.text()).toContain('"error"');
+    expect(cancelled).toBe(true);
+  }, 1000);
+
   test("a provider terminal before source EOF completes rather than aborting the response", async () => {
     let input;
     let cancelled = false;
