@@ -44,31 +44,39 @@ function responseBody(source, controller, limit) {
   const reader = source.getReader();
   let total = 0;
   let closed = false;
+  let released = false;
   const stop = () => { void reader.cancel(controller.signal.reason).catch(() => {}); };
   controller.signal.addEventListener("abort", stop, { once: true });
   const cleanup = () => {
-    if (closed) return;
-    closed = true;
+    if (released) return;
+    released = true;
     controller.signal.removeEventListener("abort", stop);
     reader.releaseLock();
   };
   return new ReadableStream({
     async pull(output) {
       try {
+        if (closed) return;
         if (controller.signal.aborted) throw controller.signal.reason ?? new Error("Cancelled.");
         const next = await reader.read();
-        if (next.done) { cleanup(); output.close(); return; }
+        if (closed) return;
+        if (next.done) { closed = true; cleanup(); output.close(); return; }
         total += next.value.byteLength;
         if (total > limit) throw new Error("The upstream response exceeds the local parser byte limit.");
         output.enqueue(next.value);
       } catch (error) {
+        if (closed) return;
+        closed = true;
         controller.abort(error);
         cleanup();
         output.error(error);
       }
     },
     async cancel(reason) {
-      controller.abort(reason);
+      if (closed) return;
+      closed = true;
+      // Official parsers cancel their source after a terminal event. That is
+      // normal completion, not cancellation of the caller's response.
       await reader.cancel(reason).catch(() => {});
       cleanup();
     },
@@ -157,16 +165,19 @@ export function legacyStream(source) {
 export function finishBody(source, finish) {
   const reader = source.getReader();
   let finished = false;
+  let closed = false;
   const done = () => { if (!finished) { finished = true; finish(); } };
   return new ReadableStream({
     async pull(output) {
       try {
+        if (closed) return;
         const next = await reader.read();
-        if (next.done) { done(); output.close(); }
+        if (closed) return;
+        if (next.done) { closed = true; done(); output.close(); }
         else output.enqueue(next.value);
-      } catch (error) { done(); output.error(error); }
+      } catch (error) { if (!closed) { closed = true; done(); output.error(error); } }
     },
-    async cancel(reason) { try { await reader.cancel(reason); } finally { done(); } },
+    async cancel(reason) { closed = true; try { await reader.cancel(reason); } finally { done(); } },
   });
 }
 
@@ -232,7 +243,7 @@ export async function decodeUpstream({ path, request, recipe: recipeText, body, 
       return jsonResponse(path === "/v1/completions" ? legacyResponse(encoded) : encoded);
     }
     let encoded = encodeStream(orderedEvents(events, mapping, reasoningOrder, maxVisibleBytes), parsed.modelId, parsed.options, {
-      signal: controller.signal, onCancel: reason => controller.abort(reason),
+      signal, onCancel: reason => controller.abort(reason),
     });
     if (path === "/v1/completions") encoded = legacyStream(encoded);
     return new Response(finishBody(encoded, finish), { headers: {

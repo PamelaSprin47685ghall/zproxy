@@ -34,18 +34,25 @@ class InputReader {
   }
 
   remainder() {
+    let closed = false;
     return new ReadableStream({
       pull: async output => {
+        if (closed) return;
         if (this.pending.length !== 0) {
           output.enqueue(this.pending);
           this.pending = new Uint8Array();
           return;
         }
         const next = await this.reader.read();
-        if (next.done) output.close();
+        if (closed) return;
+        if (next.done) { closed = true; this.reader.releaseLock(); output.close(); }
         else output.enqueue(next.value);
       },
-      cancel: reason => this.reader.cancel(reason),
+      cancel: async reason => {
+        if (closed) return;
+        closed = true;
+        try { await this.reader.cancel(reason); } finally { this.reader.releaseLock(); }
+      },
     });
   }
 

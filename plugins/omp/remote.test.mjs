@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRemoteGateway, userScope, validateConfig } from "./remote.mjs";
 import { patchUpstream } from "./patch-upstream.mjs";
+import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { createAuthGatewayRouter } from "@oh-my-pi/pi-ai/auth-gateway/server";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const id = "c".repeat(32);
 const headers = { "content-type": "application/json", "x-zproxy-user-id": id,
@@ -18,6 +22,19 @@ let gateway;
 let seen;
 
 beforeAll(async () => {
+  registerCustomApi("fixture-native", selected => {
+    const stream = new AssistantMessageEventStream();
+    const message = { role: "assistant", api: "fixture-native", provider: selected.provider, model: selected.id,
+      content: [{ type: "text", text: "native fixture" }], stopReason: "stop", timestamp: Date.now(),
+      usage: { input: 2, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 4,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    stream.push({ type: "start", partial: message });
+    stream.push({ type: "text_start", contentIndex: 0, partial: message });
+    stream.push({ type: "text_delta", contentIndex: 0, delta: "native fixture", partial: message });
+    stream.push({ type: "text_end", contentIndex: 0, content: "native fixture", partial: message });
+    stream.push({ type: "done", reason: "stop", message });
+    return stream;
+  }, "zproxy-remote-test");
   dir = await mkdtemp(join(tmpdir(), "zproxy-omp-remote-"));
   server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     seen = { url: request.url, auth: request.headers.get("authorization"), body: await request.json(), headers: request.headers };
@@ -30,10 +47,21 @@ beforeAll(async () => {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
   } } }));
   gateway = await createRemoteGateway({ version: 1, authDatabase: join(dir, "auth.db"), modelsFile,
-    discovery: "offline", aliases: { friendly: "fixture/demo" } }, { fetch });
+    discovery: "offline", aliases: { friendly: "fixture/demo" } }, { fetch,
+    routingFactory({ storage, dispatch }) {
+      storage.keys.setRuntime("fallback", "fixture-native-key");
+      const model = buildModel({ api: "fixture-native", provider: "fallback", id: "native", name: "Native fixture",
+        baseUrl: "http://127.0.0.1/never-used", reasoning: false, input: ["text"], contextWindow: 8192, maxTokens: 1024,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+      const fallback = createAuthGatewayRouter({ storage, resolveModel: id => id === "fallback/native" ? model : undefined });
+      return { async dispatch(request, peer, scope) {
+        const body = await request.clone().json();
+        return body.model === "fallback/native" ? fallback.route(request, peer, scope) : dispatch(request, peer, scope);
+      }, close: () => fallback.close() };
+    } });
 }, 30000);
 
-afterAll(async () => { await gateway?.close(); server?.stop(true); if (dir) await rm(dir, { recursive: true, force: true }); });
+afterAll(async () => { await gateway?.close(); unregisterCustomApis("zproxy-remote-test"); server?.stop(true); if (dir) await rm(dir, { recursive: true, force: true }); });
 
 describe("official remote OMP gateway", () => {
   test("uses server models and credentials, then hands off the original upstream body", async () => {
@@ -69,6 +97,20 @@ describe("official remote OMP gateway", () => {
     const response = await gateway.handle(new Request("http://private/v1/chat/completions", { method: "POST", body: "{}" }));
     expect(response.status).toBe(401);
     expect((await gateway.handle(new Request("http://private/v1/credentials/check", { headers }))).status).toBe(404);
+  });
+
+  test("the actual semantic fallback returns legacy text JSON and SSE", async () => {
+    for (const streaming of [false, true]) {
+      const response = await gateway.handle(new Request("http://private/v1/completions", { method: "POST", headers,
+        body: JSON.stringify({ model: "fallback/native", prompt: "hello", stream: streaming }) }));
+      expect(response.status).toBe(200);
+      expect(response.headers.has("x-zproxy-decode")).toBe(false);
+      const text = await response.text();
+      expect(text).toContain('"object":"text_completion"');
+      expect(text).toContain('"text":"native fixture"');
+      expect(text).not.toContain('"object":"chat.completion');
+      if (streaming) expect(text).toContain("data: [DONE]");
+    }
   });
 });
 

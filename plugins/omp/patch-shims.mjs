@@ -15,9 +15,9 @@ const patches = [
   {
     "path": "lib/router/protocol-codec.mjs",
     "before": "499dd8a219f3072817875ec0fb068963fd5fc0ce6bbeea6f7ed1de247f7953a6",
-    "after": "df9027781235322f10fe48a48aacbc5d2d17b2c5cfcebb79594de359fc25c589",
+    "after": "47f7a11c7a7871d16f884c006f594666610c0f0b13f433cc344621a1c129c731",
     "old": "export function rewriteResponseModel(format, response, publicModel) {",
-    "new": "export function rewriteResponseModel(format, response, publicModel) {\n  // zproxy rewrites only the bounded decode metadata; the local OMP owns the body.\n  if (response?.headers.get(\"x-zproxy-decode\") === \"1\") return response;"
+    "new": "export function rewriteResponseModel(format, response, publicModel) {\n  // zproxy rewrites only the bounded decode metadata; the local OMP owns the body.\n  if (response?.headers.get(\"x-zproxy-decode\") === \"1\" || response?.headers.get(\"x-zproxy-passthrough\") === \"1\") return response;"
   }
 ];
 const digest = text => createHash("sha256").update(text).digest("hex");

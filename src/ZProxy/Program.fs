@@ -215,14 +215,14 @@ Common options:
   --stream-window-bytes N           16384..4194304; default: 262144
   --omp                            Enable the optional bundled OMP worker
   --omp-dir PATH                   Bundle directory; default: ZPROXY_OMP_DIR or ./omp beside the executable
-  --omp-reasoning-order            Client only: hold visible output until reasoning is complete
   --bun PATH                       Bun executable; default: ZPROXY_BUN or the bundled bin/bun
 Client options:
+  --omp-reasoning-order             Hold visible output until reasoning is complete; requires --omp
   --uuid-env NAME                   User UUID variable; default: ZPROXY_USER_UUID
   --connect-timeout-seconds N       Greater than 0, at most 3600; default: 15
 Server options:
   --admin-password-env NAME         Admin password variable; default: ZPROXY_ADMIN_PASSWORD
-  --gateway URL                    Fixed remote OMP/OpenAI gateway authority; required
+  --gateway URL                    Fixed remote OMP/OpenAI gateway authority; required without --omp
   --gateway-token-env NAME          Optional remote-only gateway bearer token variable
   --omp-config PATH                Private remote OMP configuration; required with --omp
   --data-dir PATH                  Private users and statistics; default: data

@@ -92,6 +92,25 @@ describe("remote raw response ownership", () => {
     expect(decoded.raw).not.toContain("private upstream details");
   });
 
+  test("terminal failures retain status and a safe quota category within the error byte limit", async () => {
+    let cancelled = false;
+    let inspected = 0;
+    const fixture = turnFor(async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(Buffer.from('insufficient_quota private-token ' + "x".repeat(100000))); },
+      cancel() { cancelled = true; },
+    }), { status: 400, headers: { "retry-after": "30" } }));
+    const response = await handoff({ observeTurn: () => ({ classifyError(text) {
+      inspected = Buffer.byteLength(text);
+      return text.includes("insufficient_quota") ? "quota" : undefined;
+    } }) })(fixture.turn);
+    expect(response.status).toBe(400);
+    expect(response.headers.get("retry-after")).toBe("30");
+    expect(await response.json()).toMatchObject({ error: { type: "insufficient_quota" } });
+    expect(inspected).toBe(65536);
+    expect(cancelled).toBe(true);
+    expect(fixture.state().settled).toBe(1);
+  });
+
   test("cancel stops the raw source and releases one lease", async () => {
     let cancelled = false;
     const fixture = turnFor(async () => new Response(new ReadableStream({

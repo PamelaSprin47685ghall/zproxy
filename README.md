@@ -148,7 +148,7 @@ curl --no-buffer 'http://127.0.0.1:18080/v1/chat/completions' \
 
 ### 远端配置
 
-先用官方 OMP 在服务器完成账户登录，或准备服务器上的官方 `models.yml`。把 `authDatabase` 指向该 OMP 使用的 `agent.db`。例如，在远端保存 `remote.json`：
+先用官方 OMP 在服务器完成账户登录，或准备服务器上的官方 `models.yml`。把 `authDatabase` 指向该 OMP 使用的 `agent.db`。完整字段示例见 [remote.example.json](plugins/omp/remote.example.json)。例如，在远端保存 `remote.json`：
 
 ```json
 {
@@ -197,6 +197,18 @@ server 与 client 命令分别在远端和本机执行，且沿用前文各自�
 如需原 omp-shims 的共享路由，在 `remote.json` 加入 `"shimsConfig": "./shims.json"`，指向现有 v2 配置。该配置启用 `lazy-router` 后，远端使用固定版本原源码中的策略、健康、亲和、并发、速度和状态存储组件；实际凭据操作接回当前官方 OMP。多个用户共享远端的路由信息，用户隧道身份仍各自独立。
 
 `routesFile` 和日志路径按 `shims.json` 所在目录解析。`stateDbPath` 由原配置模块处理；建议使用明确的服务器私有绝对路径。`shimsConfig` 不是把所有旧猴子补丁无条件重新装上：已由官方功能接管的 shim 删除，必须保留的部分在对应边界实现。每项处理和限制见 [OMP_PARITY.md](docs/OMP_PARITY.md)。原路由事件日志属于远端私有诊断；公开 `/reports` 仍只显示昵称及聚合计数。
+
+### 同接口提供方直接通过
+
+对服务器 `models.yml` 中已经提供相同 OpenAI chat 接口的自定义提供方，可在 `remote.json` 显式加入：
+
+```json
+"passthroughProviders": ["internal-openai"]
+```
+
+这里填写 provider 名称，默认列表为空。仅当实际模型使用 `openai-completions`、采用静态 API key 或无需认证、且没有内建特殊 provider 定义、自定义插件 transport 或 OAuth 账户池时，`/v1/chat/completions` 才走此捷径。远端仍用官方目录解析模型和凭据，并保留路由的健康、并发和用量状态；请求不再变成 OMP 中间消息，响应直接送回调用方，不进入本地 OMP 解析器。请求中的原 tool-call ID 保持不变。
+
+此路径保留上游响应中的 `model`，不会将它改成公开别名或虚拟路由名。`/v1/completions`、OAuth 及特殊 transport 仍走原 gateway 适配路径。这是服务器管理员对已确认兼容提供方的显式选择，不会根据模型名称自动猜测兼容性。
 
 ### 下行范围和限制
 

@@ -10,17 +10,18 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { indexModelsByRequestId, resolveGatewayModel } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-cli";
-import { descriptorFor, normalizeOpenAIRequest, serializeRecipe } from "./contract.mjs";
+import { buildToolIdMap, descriptorFor, normalizeOpenAIRequest, serializeRecipe } from "./contract.mjs";
 import { createRawHandoff } from "./remote-handoff.mjs";
 import { continueGoogle } from "./remote-google.mjs";
 import { legacyResponse, legacyStream } from "./local-codec.mjs";
 import { createRemoteFeatures, getWireInfo } from "./remote-features.mjs";
+import { createPassthrough } from "./remote-passthrough.mjs";
 
 const PATHS = new Set(["/v1/chat/completions", "/v1/completions"]);
 const HEADER_NAMES = ["content-type", "cache-control", "retry-after", "x-zproxy-decode"];
 const CONFIG_KEYS = new Set(["version", "authDatabase", "modelsFile", "modelCache", "aliases", "providerOrder",
   "disabledProviders", "discovery", "refreshMs", "headerTimeoutMs", "idleTimeoutMs", "maxRequestBytes",
-  "accountPolicies", "defaultReservePct", "shimsConfig"]);
+  "accountPolicies", "defaultReservePct", "shimsConfig", "passthroughProviders"]);
 const utf8 = new TextEncoder();
 
 function plain(value, max, label) {
@@ -43,7 +44,7 @@ export function validateConfig(value, base = process.cwd()) {
   config.aliases ??= {};
   if (!config.aliases || typeof config.aliases !== "object" || Array.isArray(config.aliases) || Object.keys(config.aliases).length > 4096) throw new Error("Invalid model aliases.");
   for (const [alias, model] of Object.entries(config.aliases)) { plain(alias, 128, "model alias"); plain(model, 512, "model target"); }
-  for (const key of ["providerOrder", "disabledProviders"]) {
+  for (const key of ["providerOrder", "disabledProviders", "passthroughProviders"]) {
     config[key] ??= [];
     if (!Array.isArray(config[key]) || config[key].length > 512) throw new Error(`Invalid ${key}.`);
     for (const provider of config[key]) plain(provider, 128, key);
@@ -173,8 +174,10 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
         return handoff(turn);
       },
     });
+    const passthrough = createPassthrough({ config, storage, registry, resolveModel, fetch: testFetch,
+      observeTurn: model => routing?.observeTurn?.(model) ?? {}, usesCustomTransport: model => features.usesCustomTransport(model) });
     const dispatch = (request, peer, scope) => features.dispatch(request, peer, scope,
-      (request, peer, scope) => gateway.route(request, peer, scope));
+      async (request, peer, scope) => await passthrough(request, scope) ?? gateway.route(request, peer, scope));
     if (routingFactory) routing = await routingFactory({ config, storage, registry, dispatch, resolveModel });
     else if (config.shimsConfig) {
       const { createRemoteRouting } = await import("./remote-routing.mjs");
@@ -191,7 +194,12 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
         let body;
         try { scope = userScope(request.headers); }
         catch { return Response.json({ error: "Authenticated IPC identity required." }, { status: 401 }); }
-        try { body = normalizeOpenAIRequest(url.pathname, await readBody(request, config.maxRequestBytes)); }
+        try {
+          const original = await readBody(request, config.maxRequestBytes);
+          scope.completionPath = url.pathname;
+          scope.toolIds = buildToolIdMap(original);
+          body = normalizeOpenAIRequest(url.pathname, original);
+        }
         catch (error) { return Response.json({ error: { message: error.message } }, { status: 400 }); }
         const controller = new AbortController();
         active.add(controller);

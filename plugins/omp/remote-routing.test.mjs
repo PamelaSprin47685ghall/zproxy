@@ -45,6 +45,19 @@ test("routing metadata bounds cancel the raw body", async () => {
   expect(canceled).toBe(true);
 });
 
+test("a routing prefix failure releases the response and long aliases remain local", async () => {
+  let canceled = false;
+  const broken = new Response(new ReadableStream({ cancel() { canceled = true; } }),
+    { headers: { "x-zproxy-private-metadata": Buffer.from("invalid json").toString("base64url") } });
+  await expect(packRoutingResponse(broken, "public")).rejects.toThrow();
+  expect(canceled).toBe(true);
+  const unpacked = await unpackRoutingResponse(framed({ decoder: "omp-response", version: 1 }, payload));
+  const packed = await packRoutingResponse(unpacked, "界".repeat(43));
+  const bytes = new Uint8Array(await packed.arrayBuffer());
+  const length = new DataView(bytes.buffer).getUint32(0);
+  expect(JSON.parse(new TextDecoder().decode(bytes.subarray(4, length + 4))).modelAlias).toBe("");
+});
+
 test("original lazy policy fails over using shared server state and preserves raw SSE", async () => {
   const folder = await mkdtemp(join(tmpdir(), "zproxy-routing-"));
   let gateway;

@@ -16,7 +16,7 @@ function abortable(signal) {
   });
 }
 
-function timeoutRead(reader, timeoutMs, signal) {
+export function timeoutRead(reader, timeoutMs, signal) {
   let timer;
   let onAbort;
   const interrupted = new Promise((_, reject) => {
@@ -59,7 +59,7 @@ function publicFailure(response) {
 }
 
 // SDK error readers receive a bounded body; the route policy gets only a category.
-async function rejectedResponse(response, signal, timeoutMs) {
+export async function rejectedResponse(response, signal, timeoutMs) {
   if (!response.body) return { response, text: "" };
   const reader = response.body.getReader();
   const parts = [];
@@ -98,7 +98,7 @@ function useful(value) {
 }
 
 // Inspect only the beginning. A provider's 200 error must remain eligible for OMP's retry policy.
-async function admit(response, signal, timeoutMs) {
+export async function admit(response, signal, timeoutMs) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const held = [];

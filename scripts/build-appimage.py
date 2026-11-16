@@ -178,10 +178,10 @@ def main():
     if not binary.is_file() or not os.access(binary, os.X_OK):
         parser.error("--binary must be the published NativeAOT executable.")
     lock = read_lock()
-    if (PLUGIN / "vendor/omp/SOURCE_COMMIT").read_text().strip() != lock["upstream"]["commit"]:
-        raise RuntimeError("Run scripts/prepare-omp.py for the pinned OMP revision first.")
-    if (PLUGIN / "vendor/shims/SOURCE_COMMIT").read_text().strip() != lock["shims"]["commit"]:
-        raise RuntimeError("Run scripts/prepare-omp.py for the pinned omp-shims revision first.")
+    for name, pin in (("omp", lock["upstream"]), ("shims", lock["shims"])):
+        marker = PLUGIN / "vendor" / name / "SOURCE_COMMIT"
+        if not marker.is_file() or marker.read_text().strip() != pin["commit"]:
+            raise RuntimeError(f"Run scripts/prepare-omp.py for the pinned {name} revision first.")
     bun = PLUGIN / "bin/bun"
     if output([bun, "--version"]).strip() != lock["bun"]["version"]:
         raise RuntimeError("The prepared Bun version does not match the lock.")

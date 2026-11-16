@@ -148,6 +148,28 @@ describe("the credential-free local OMP adapter", () => {
     expect(await cancelled.promise).toBe(true);
   });
 
+  test("a provider terminal before source EOF completes rather than aborting the response", async () => {
+    let input;
+    let cancelled = false;
+    const source = new ReadableStream({ start(controller) { input = controller; }, cancel() { cancelled = true; } });
+    const response = await raw("openai-completions", "", { ...chatRequest, stream: true }, { body: source });
+    const pending = response.text();
+    input.enqueue(encoder.encode(sse(chatEvents)));
+    const text = await pending;
+    expect(text).toContain("Hello");
+    expect(text).toContain('"finish_reason":"stop"');
+    expect(text).toContain("data: [DONE]");
+    expect(text).not.toContain('"error"');
+    expect(cancelled).toBe(true);
+  });
+
+  test("an internal parser limit sends an error and closes a live stream", async () => {
+    const response = await raw("openai-completions", sse(chatEvents), { ...chatRequest, stream: true }, { maxResponseBytes: 16 });
+    const text = await response.text();
+    expect(text).toContain('"error"');
+    expect(text).toContain("byte limit");
+  });
+
   test("never uses global fetch, including attempted continuation", async () => {
     const before = globalThis.fetch;
     let calls = 0;
@@ -221,17 +243,17 @@ test("private HTTP IPC sends response bytes before request EOF", async () => {
   socket.on("error", error => { arrived.reject(error); completed.reject(error); });
   socket.on("data", chunk => {
     response += chunk.toString();
-    if (response.includes('"role":"assistant"')) arrived.resolve(true);
-    if (sentTail && response.includes("data: [DONE]")) completed.resolve(true);
+    if (response.includes('"content":"Hello"')) arrived.resolve(true);
+    if (sentTail && response.includes("data: [DONE]") && /\r\n0\r\n\r\n$/.test(response)) completed.resolve(true);
   });
   try {
     await new Promise((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
     socket.write("POST /decode HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n");
-    writeChunk(Buffer.concat([length, envelope, original]));
+    writeChunk(Buffer.concat([length, envelope, original, Buffer.from(sse(chatEvents.slice(0, 1)))]));
     expect(await arrived.promise).toBe(true);
     expect(response).toContain("Transfer-Encoding: chunked");
     sentTail = true;
-    writeChunk(Buffer.from(sse(chatEvents)));
+    writeChunk(Buffer.from(sse(chatEvents.slice(1))));
     socket.write("0\r\n\r\n");
     expect(await completed.promise).toBe(true);
     expect(response).toContain("Hello");
