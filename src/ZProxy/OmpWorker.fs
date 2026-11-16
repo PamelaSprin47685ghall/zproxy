@@ -12,6 +12,37 @@ open System.Threading.Tasks
 
 /// Own one optional Bun worker and its private duplex HTTP connections.
 module OmpWorker =
+    let private logLock = obj()
+
+    /// Replace long secret-like runs before a worker line reaches the process log.
+    let private redact (line: string) =
+        let out = System.Text.StringBuilder(line.Length)
+        let isToken (c: char) = Char.IsLetterOrDigit c || c = '_' || c = '-' || c = '.'
+        let mutable runStart = -1
+        let mutable i = 0
+        while i < line.Length do
+            if isToken line[i] then
+                if runStart < 0 then runStart <- i
+            else
+                if runStart >= 0 then
+                    let len = i - runStart
+                    if len >= 40 then out.Append("<redacted>") |> ignore
+                    else out.Append(line, runStart, len) |> ignore
+                    runStart <- -1
+                out.Append(line[i]) |> ignore
+            i <- i + 1
+        if runStart >= 0 then
+            let len = line.Length - runStart
+            if len >= 40 then out.Append("<redacted>") |> ignore
+            else out.Append(line, runStart, len) |> ignore
+        out.ToString()
+
+    let private logWorker (role: string) (stream: string) (line: string) =
+        if not (String.IsNullOrWhiteSpace line) then
+            let masked = redact line
+            let text = if masked.Length > 4000 then masked.Substring(0, 4000) + "..." else masked
+            lock logLock (fun () -> eprintfn "zproxy: omp[%s/%s] %s" role stream text)
+
     type private ResponseBody(source: Stream, close: unit -> unit) =
         inherit Stream()
         let mutable disposed = 0
@@ -44,12 +75,17 @@ module OmpWorker =
         let mutable output = Task.CompletedTask
         let mutable errors = Task.CompletedTask
 
-        let drain (reader: StreamReader) = task {
-            let buffer = Array.zeroCreate<char> 1024
-            let mutable active = true
-            while active do
-                let! count = reader.ReadAsync(buffer.AsMemory())
-                active <- count <> 0
+        let drain (reader: StreamReader) (stream: string) = task {
+            try
+                let mutable active = true
+                while active do
+                    let! line = reader.ReadLineAsync()
+                    if isNull line then active <- false
+                    else logWorker role stream line
+            with
+            | :? OperationCanceledException -> ()
+            | :? ObjectDisposedException -> ()
+            | :? IOException -> ()
         }
 
         member _.Folder = folder
@@ -90,13 +126,13 @@ module OmpWorker =
             if not (child.Start()) then raise (IOException("The OMP worker did not start."))
             started <- true
             child.StandardInput.Close()
-            errors <- drain child.StandardError
+            errors <- drain child.StandardError "stderr"
             use deadline = CancellationTokenSource.CreateLinkedTokenSource(ct)
             deadline.CancelAfter(TimeSpan.FromSeconds(60.0))
             let! ready = child.StandardOutput.ReadLineAsync(deadline.Token)
             if ready <> "READY" || child.HasExited then
                 raise (IOException("The OMP worker did not become ready. Check its bundle and server configuration."))
-            output <- drain child.StandardOutput
+            output <- drain child.StandardOutput "stdout"
         }
 
         member _.SendAsync(path: string, headers: (string * string) list,

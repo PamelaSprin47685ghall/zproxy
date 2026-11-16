@@ -172,3 +172,54 @@ test("Google continuation uses remote credentials and produces one raw stream", 
   expect(text).toContain('"promptTokenCount":22');
   expect(text).toContain('"contextTokenCount":15');
 });
+
+function terminalTurn(fetcher, terminal, stream) {
+  const controller = new AbortController();
+  const options = { signal: controller.signal, fetch: fetcher };
+  return {
+    model, controller, options, parsed: { modelId: "public-alias", stream },
+    settle() {}, observeUsage() {},
+    stream() {
+      const promise = (async () => {
+        const response = await options.fetch("http://private.invalid/v1/responses", {
+          method: "POST", headers: { Authorization: "Bearer secret" }, body: "{}", signal: controller.signal });
+        await response.text();
+        return terminal;
+      })();
+      return { result: () => promise };
+    },
+  };
+}
+
+const jsonOnly = () => Response.json({ id: "resp_1" }, { headers: { "content-type": "application/json" } });
+const success = { role: "assistant", content: [{ type: "text", text: "OK" }], stopReason: "stop",
+  usage: { input: 8, output: 5, totalTokens: 13 } };
+
+describe("upstream that never yields a raw stream", () => {
+  test("encodes the parsed terminal as SSE for a streaming caller", async () => {
+    const response = await handoff()(terminalTurn(jsonOnly, success, true));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/event-stream");
+    expect(response.headers.has("x-zproxy-decode")).toBe(false);
+    const text = await response.text();
+    expect(text).toContain('"content":"OK"');
+    expect(text).toContain('"finish_reason":"stop"');
+    expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  test("encodes the parsed terminal as one completion for a buffered caller", async () => {
+    const response = await handoff()(terminalTurn(jsonOnly, success, false));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.object).toBe("chat.completion");
+    expect(body.choices[0].message.content).toBe("OK");
+    expect(body.usage.total_tokens).toBe(13);
+  });
+
+  test("still fails when the terminal carries an error", async () => {
+    const failed = { role: "assistant", content: [], stopReason: "error" };
+    const response = await handoff()(terminalTurn(jsonOnly, failed, true));
+    expect(response.status).toBe(502);
+    expect((await response.json()).error.type).toBe("upstream_error");
+  });
+});
