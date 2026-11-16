@@ -8,3 +8,4 @@ data/
 *.suo
 .DS_Store
 __pycache__/
+.herd/
