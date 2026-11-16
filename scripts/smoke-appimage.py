@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 
-from bundle_support import ROOT, read_lock, run
+from bundle_support import ROOT, read_lock, run, sha256
 
 
 def main():
@@ -28,7 +28,7 @@ def main():
         plugin = appdir / "usr/lib/zproxy/omp"
         commands = working / "commands"
         commands.mkdir()
-        # AppRun needs dirname. No host Bun or dotnet command is available.
+        # AppRun needs dirname. No host Bun, dotnet, or Go command is available.
         (commands / "dirname").symlink_to(Path(shutil.which("dirname")).resolve())
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("DOTNET_", "ZPROXY_", "BUN_", "PI_"))
@@ -47,6 +47,13 @@ def main():
             raise RuntimeError("The image includes a different OMP source revision.")
         if manifest["upstream"]["shims"]["commit"] != lock["shims"]["commit"]:
             raise RuntimeError("The image includes a different omp-shims source revision.")
+        worker = plugin / "bin/zproxy-ag"
+        if (manifest["ag2apiWorker"]["source"] != lock["ag2api"]
+                or manifest["ag2apiWorker"]["workerSha256"] != sha256(worker)):
+            raise RuntimeError("The image includes a different AG2API codec worker.")
+        if (plugin / "vendor/ag2api").exists():
+            raise RuntimeError("The AG2API source build tree must not enter the image.")
+        run([sys.executable, ROOT / "scripts/smoke-ag2api.py", "--binary", worker], env=environment, timeout=60)
         run([bun, "-e", 'import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry"; '
              'import { LazyRouter } from "./vendor/shims/lib/router/router.mjs"; '
              'await import("@oh-my-pi/pi-ai/providers/openai-chat-server"); '
@@ -58,7 +65,9 @@ def main():
         run([sys.executable, ROOT / "scripts/smoke-native.py", "--binary", launcher], env=environment, timeout=90)
         run([sys.executable, ROOT / "scripts/smoke-omp.py", "--binary", launcher, "--omp-dir", plugin],
             env=environment, timeout=150)
-    print("AppImage smoke passed: extracted NativeAOT core, bundled Bun and OMP, direct relay, and split OMP response conversion.")
+        run([sys.executable, ROOT / "scripts/smoke-omp.py", "--binary", launcher, "--omp-dir", plugin, "--antigravity2api"],
+            env=environment, timeout=150)
+    print("AppImage smoke passed: extracted NativeAOT core, bundled Bun, OMP and Go codec, direct relay, and split response conversion.")
 
 
 if __name__ == "__main__":

@@ -98,7 +98,7 @@ function useful(value) {
 }
 
 // Inspect only the beginning. A provider's 200 error must remain eligible for OMP's retry policy.
-export async function admit(response, signal, timeoutMs) {
+export async function admit(response, signal, timeoutMs, acceptEvent = () => false) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const held = [];
@@ -124,7 +124,7 @@ export async function admit(response, signal, timeoutMs) {
           }
           return { error };
         }
-        if (useful(value)) {
+        if (useful(value) || acceptEvent(value)) {
           return { response: new Response(new ReadableStream({
             async pull(controller) {
               if (held.length) controller.enqueue(held.shift());
@@ -203,7 +203,7 @@ export function usageTap(onUsage, api) {
   };
 }
 
-function framed(metadata, raw, finish, signal, timeoutMs, tap) {
+export function framed(metadata, raw, finish, signal, timeoutMs, tap) {
   const encoded = new TextEncoder().encode(JSON.stringify(metadata));
   if (encoded.byteLength > 16384) throw new Error("The decode metadata exceeds its limit.");
   const prefix = new Uint8Array(4 + encoded.byteLength);

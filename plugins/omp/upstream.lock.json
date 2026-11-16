@@ -24,6 +24,19 @@
     "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64-baseline.zip",
     "sha256": "e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76"
   },
+  "ag2api": {
+    "repository": "https://github.com/Mag1cFall/Antigravity2API.git",
+    "commit": "d36920f3e178eb6d94a49c0b184947cb7df8b3b1",
+    "version": "0.1.8",
+    "goModSha256": "b9622326f42f1a7d54c646e23f4f7c12570cdf3673ff6c6a9293e401501f2440",
+    "goSumSha256": "cea27ea3e877673651c332ca73699adc1d0cfef1e5d81a0005a9d3b8cab473df",
+    "licenseSha256": "cca76be3b407663a238f51fa8d7740ef8be53fa2d18a99c27d7997c9c0a801e4"
+  },
+  "go": {
+    "version": "1.27.4",
+    "url": "https://go.dev/dl/go1.27.4.linux-amd64.tar.gz",
+    "sha256": "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840"
+  },
   "shims": {
     "repository": "https://github.com/PamelaSprin47685ghall/omp-shims.git",
     "commit": "34189f420516f5ceeb8373998cc31896553c57ea",

@@ -2,6 +2,7 @@
 """Check the native OMP bridge and bundled workers with owned loopback traffic."""
 
 import argparse
+import concurrent.futures
 import contextlib
 import http.client
 import http.cookies
@@ -45,7 +46,7 @@ def descendants(pid):
     return result
 
 
-def run(binary, omp_dir, timeout):
+def run(binary, omp_dir, timeout, antigravity=False):
     deadline = time.monotonic() + timeout
     password, provider_key, caller_key = (secrets.token_urlsafe(32) for _ in range(3))
     user_uuid = ""
@@ -56,8 +57,14 @@ def run(binary, omp_dir, timeout):
     failures = queue.Queue()
     raw_bytes = [0]
     raw_lock = threading.Lock()
-    request_bytes = json.dumps({"model": "fixture-alias", "messages": [{"role": "user", "content": "stream-smoke " + "context " * 8192}], "stream": True, "stream_options": {"include_usage": True}}, separators=(",", ":")).encode()
+    legacy_count = 6 if antigravity else 1
+    legacy_started = [0]
+    legacy_ready = threading.Event()
+    signature = "owned-fixture-thought-signature"
+    original = {"model": "fixture-alias", "messages": [{"role": "user", "content": "stream-smoke " + "context " * 8192}], "stream": True, "stream_options": {"include_usage": True}}
+    request_bytes = json.dumps(original, separators=(",", ":")).encode()
     legacy_bytes = b'{"model":"fixture-alias","prompt":"legacy-smoke","stream":false}'
+    followup_bytes = b""
 
     def remaining(limit=10):
         left = deadline - time.monotonic()
@@ -71,6 +78,18 @@ def run(binary, omp_dir, timeout):
     first = frame({"choices": [{"index": 0, "delta": {"reasoning_content": "first-thought"}, "finish_reason": None}]})
     visible = frame({"choices": [{"index": 0, "delta": {"content": "converted-visible"}, "finish_reason": None}]})
     terminal = frame({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}}) + b"data: [DONE]\n\n"
+    def google(parts, finish=None):
+        candidate = {"content": {"role": "model", "parts": parts}}
+        response = {"candidates": [candidate]}
+        if finish:
+            candidate["finishReason"] = finish
+            response["usageMetadata"] = {"promptTokenCount": 5, "candidatesTokenCount": 3, "totalTokenCount": 8}
+        return frame({"response": response})
+
+    if antigravity:
+        first = google([{"text": "first-thought", "thought": True}])
+        visible = google([{"text": "converted-visible", "thoughtSignature": signature}])
+        terminal = google([], "STOP")
 
     class Origin(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -108,15 +127,29 @@ def run(binary, omp_dir, timeout):
 
         def do_POST(self):
             try:
-                require(self.path == "/v1/chat/completions", "The official OMP upstream route changed.")
+                expected_path = "/v1internal:streamGenerateContent?alt=sse" if antigravity else "/v1/chat/completions"
+                require(self.path == expected_path, "The selected upstream route changed.")
                 require(self.headers.get("Authorization") == "Bearer " + provider_key, "OMP did not use the server-only credential.")
                 require(self.headers.get("Accept-Encoding") == "identity", "OMP did not select uncompressed raw response bytes.")
                 for secret in (password, user_uuid, caller_key):
                     require(secret not in str(self.headers), "A caller credential reached the upstream.")
                 body = self.body()
-                require(body.get("model") == "model", "The remote model alias was not resolved.")
-                require(body.get("stream") is True, "The remote OMP adapter did not request the raw stream.")
-                legacy = "legacy-smoke" in json.dumps(body.get("messages"))
+                if antigravity:
+                    require(body.get("model") == "gemini-3.8-flash-low", "The remote AG model alias and effort tier were not resolved.")
+                    require(self.headers.get("User-Agent") == "zproxy/AG2API", "The AG adapter did not identify its transport.")
+                    require(body.get("project") == "smoke-project", "The selected account project was lost.")
+                    require("messages" not in body and "_zproxy_ag" not in json.dumps(body), "A private request format reached the upstream.")
+                    contents = body.get("request", {}).get("contents", [])
+                else:
+                    require(body.get("model") == "model", "The remote model alias was not resolved.")
+                    require(body.get("stream") is True, "The remote OMP adapter did not request the raw stream.")
+                    contents = body.get("messages")
+                legacy = "legacy-smoke" in json.dumps(contents)
+                followup = "followup-smoke" in json.dumps(contents)
+                if followup:
+                    require(any(part.get("thoughtSignature") == signature for item in contents
+                                if item.get("role") == "model" for part in item.get("parts", [])),
+                            "The next turn did not restore its matching local thought signature.")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Transfer-Encoding", "chunked")
@@ -125,7 +158,15 @@ def run(binary, omp_dir, timeout):
                 self.send_header("X-Api-Key", provider_key)
                 self.end_headers()
                 if legacy:
-                    self.chunk(frame({"choices": [{"index": 0, "delta": {"content": "legacy-result"}, "finish_reason": None}]}))
+                    with raw_lock:
+                        legacy_started[0] += 1
+                        if legacy_started[0] == legacy_count:
+                            legacy_ready.set()
+                    require(legacy_ready.wait(remaining(30)), "A provider or local codec concurrency cap blocked parallel requests.")
+                    self.chunk(google([{"text": "legacy-result"}]) if antigravity else
+                               frame({"choices": [{"index": 0, "delta": {"content": "legacy-result"}, "finish_reason": None}]}))
+                elif followup:
+                    self.chunk(google([{"text": "followup-result"}]))
                 else:
                     self.chunk(first)
                     require(release.wait(remaining(30)), "Parsed reasoning did not reach the caller before upstream EOF.")
@@ -134,7 +175,7 @@ def run(binary, omp_dir, timeout):
                 self.chunk(terminal)
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
-                if not legacy:
+                if not legacy and not followup:
                     origin_finished.set()
             except Exception as error:
                 failures.put(str(error))
@@ -198,8 +239,17 @@ def run(binary, omp_dir, timeout):
         directory = Path(temporary)
         config = directory / "remote.json"
         models = directory / "models.yml"
-        models.write_text(json.dumps({"providers": {"fixture": {"baseUrl": f"http://127.0.0.1:{origin.server_port}/v1", "api": "openai-completions", "apiKey": provider_key, "models": [{"id": "model", "name": "Fixture", "reasoning": True, "input": ["text"], "contextWindow": 8192, "maxTokens": 1024, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}}))
-        config.write_text(json.dumps({"version": 1, "authDatabase": str(directory / "auth.db"), "modelsFile": str(models), "modelCache": str(directory / "models.db"), "discovery": "offline", "aliases": {"fixture-alias": "fixture/model"}}))
+        provider = "google-antigravity" if antigravity else "fixture"
+        model_id = "gemini-3.8-flash" if antigravity else "model"
+        models.write_text(json.dumps({"providers": {provider: {
+            "baseUrl": f"http://127.0.0.1:{origin.server_port}" + ("" if antigravity else "/v1"),
+            "api": "google-gemini-cli" if antigravity else "openai-completions",
+            "apiKey": json.dumps({"token": provider_key, "projectId": "smoke-project"}) if antigravity else provider_key,
+            "models": [{"id": model_id, "name": "Fixture", "reasoning": True, "input": ["text"], "contextWindow": 8192,
+                        "maxTokens": 1024, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}}))
+        config.write_text(json.dumps({"version": 1, "authDatabase": str(directory / "auth.db"), "modelsFile": str(models),
+                                     "modelCache": str(directory / "models.db"), "discovery": "offline",
+                                     "antigravity2api": antigravity, "aliases": {"fixture-alias": f"{provider}/{model_id}"}}))
         models.chmod(0o600)
         config.chmod(0o600)
         try:
@@ -207,7 +257,7 @@ def run(binary, omp_dir, timeout):
                 log = directory / f"{role}.log"
                 logs.append(log)
                 with log.open("wb") as output:
-                    process = subprocess.Popen([str(binary), role, "--omp", "--omp-dir", str(omp_dir), "--max-streams", "4", "--stream-window-bytes", "16384"] + arguments, env=env, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT)
+                    process = subprocess.Popen([str(binary), role, "--omp", "--omp-dir", str(omp_dir), "--max-streams", "16" if antigravity else "4", "--stream-window-bytes", "16384"] + arguments, env=env, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT)
                 processes.append(process)
                 return process
 
@@ -245,15 +295,20 @@ def run(binary, omp_dir, timeout):
                     received.extend(line)
                 require(not origin_finished.is_set(), "The response was buffered until upstream EOF.")
                 require(b'"role":"assistant"' in received and b'"model":"fixture-alias"' in received, "The official local OpenAI encoder did not run.")
-                phase = "decoding a concurrent nonstream legacy completion"
-                with contextlib.closing(http.client.HTTPConnection("127.0.0.1", client_port, timeout=remaining(20))) as concurrent:
-                    concurrent.request("POST", "/v1/completions", legacy_bytes, caller_headers)
-                    probe = concurrent.getresponse()
-                    require(probe.status == 200, "The concurrent legacy completion failed.")
-                    safe_headers(probe)
-                    value = json.loads(probe.read(65537))
-                    require(value["object"] == "text_completion" and value["choices"][0]["text"] == "legacy-result", "The local legacy response conversion failed.")
-                    require(value["usage"]["total_tokens"] == 8, "The local parser lost usage.")
+                phase = "decoding concurrent nonstream legacy completions"
+                def legacy_probe():
+                    with contextlib.closing(http.client.HTTPConnection("127.0.0.1", client_port, timeout=remaining(30))) as concurrent:
+                        concurrent.request("POST", "/v1/completions", legacy_bytes, caller_headers)
+                        probe = concurrent.getresponse()
+                        require(probe.status == 200, "The concurrent legacy completion failed.")
+                        safe_headers(probe)
+                        value = json.loads(probe.read(65537))
+                        require(value["object"] == "text_completion" and value["choices"][0]["text"] == "legacy-result", "The local legacy response conversion failed.")
+                        require(value["usage"]["total_tokens"] == 8, "The local parser lost usage.")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=legacy_count) as pool:
+                    jobs = [pool.submit(legacy_probe) for _ in range(legacy_count)]
+                    for job in jobs:
+                        job.result(timeout=remaining(35))
                 release.set()
                 phase = "receiving locally parsed visible text before upstream EOF"
                 while b"converted-visible" not in received:
@@ -267,7 +322,20 @@ def run(binary, omp_dir, timeout):
                 require(len(received) <= 1048576 and b"converted-visible" in received and b"data: [DONE]" in received, "The decoded response did not finish.")
                 require(provider_key.encode() not in received, "A provider credential reached the response body.")
             require(origin_finished.wait(remaining()), "The upstream fixture did not finish.")
+            if antigravity:
+                phase = "restoring a matching thought signature on the next turn"
+                followup_bytes = json.dumps({"model": "fixture-alias", "messages": original["messages"] + [
+                    {"role": "assistant", "content": "converted-visible"}, {"role": "user", "content": "followup-smoke"}],
+                    "stream": False}, separators=(",", ":")).encode()
+                with contextlib.closing(http.client.HTTPConnection("127.0.0.1", client_port, timeout=remaining(20))) as connection:
+                    connection.request("POST", "/v1/chat/completions", followup_bytes, caller_headers)
+                    response = connection.getresponse()
+                    require(response.status == 200, "The signature followup failed.")
+                    safe_headers(response)
+                    value = json.loads(response.read(65537))
+                    require(value["choices"][0]["message"]["content"] == "followup-result", "The followup was not decoded locally.")
             require(failures.empty(), "The upstream fixture reported a failure.")
+            total = 1 + legacy_count + bool(followup_bytes)
             phase = "checking the public nickname report and raw byte counts"
             while True:
                 status, _, data = web("GET", "/api/reports")
@@ -277,16 +345,22 @@ def run(binary, omp_dir, timeout):
                 row = rows[0]
                 for secret in (user_uuid, user_id, password, provider_key, caller_key):
                     require(secret.encode() not in data, "A public report exposed private identity or credentials.")
-                if row["requests"] == 2 and row["active"] == 0:
+                if row["requests"] == total and row["active"] == 0:
                     break
                 time.sleep(remaining(0.02))
-            require(row["succeeded"] == 2 and row["failed"] == 0, "The report did not record both completions.")
-            require(row["requestBytes"] == len(request_bytes) + len(legacy_bytes), "The request byte count changed.")
+            require(row["succeeded"] == total and row["failed"] == 0, "The report did not record all completions.")
+            original_size = len(request_bytes) + legacy_count * len(legacy_bytes) + len(followup_bytes)
+            if antigravity:
+                require(original_size < row["requestBytes"] < original_size + 4096, "The request count did not include bounded private signature metadata.")
+            else:
+                require(row["requestBytes"] == original_size, "The request byte count changed.")
             require(row["responseBytes"] == raw_bytes[0], "The report did not count the remote raw response bytes.")
             phase = "stopping native processes and their OMP workers"
             stop(client, True)
             stop(server, True)
-            print("OMP smoke passed: real remote gateway, server-only credentials, local official parsing before upstream EOF, concurrent legacy conversion, usage, nickname reports, raw-byte accounting, and worker cleanup.")
+            print(("AG2API" if antigravity else "OMP") + " smoke passed: real remote gateway, server-only credentials, local parsing before upstream EOF, "
+                  + ("six concurrent legacy conversions, next-turn signature recovery, " if antigravity else "concurrent legacy conversion, ")
+                  + "usage, nickname reports, raw-byte accounting, and worker cleanup.")
         except Exception:
             print("Phase:", phase)
             for log in logs:
@@ -301,6 +375,7 @@ def run(binary, omp_dir, timeout):
         finally:
             release.set()
             finish_stream.set()
+            legacy_ready.set()
             for process in reversed(processes):
                 stop(process)
             origin.shutdown()
@@ -313,12 +388,15 @@ def main():
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--omp-dir", type=Path, default=Path(__file__).resolve().parents[1] / "plugins" / "omp")
     parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument("--antigravity2api", action="store_true", help="Use the pinned AG Go codec and verify concurrent streams and signature recovery.")
     args = parser.parse_args()
     binary, omp_dir = args.binary.resolve(), args.omp_dir.resolve()
     require(binary.is_file() and os.access(binary, os.X_OK), "--binary must be an executable file.")
     require((omp_dir / "local.mjs").is_file() and (omp_dir / "remote.mjs").is_file(), "--omp-dir must contain both workers.")
     require(10 <= args.timeout <= 600, "--timeout must be between 10 and 600 seconds.")
-    run(binary, omp_dir, args.timeout)
+    if args.antigravity2api:
+        require((omp_dir / "bin" / "zproxy-ag").is_file(), "The AG2API smoke requires the bundled Go codec.")
+    run(binary, omp_dir, args.timeout, args.antigravity2api)
 
 
 if __name__ == "__main__":

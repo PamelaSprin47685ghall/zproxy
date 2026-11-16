@@ -98,21 +98,42 @@ module Omp =
                 else
                     if original.Headers.ContentLength.HasValue && original.Headers.ContentLength.Value > MaxRequestBytes then
                         raise (InvalidDataException("The OMP request exceeds 64 MiB."))
-                    let! source = original.ReadAsStreamAsync(ct)
-                    let capture = new Capture(source, worker.Folder)
-                    let content = new StreamContent(new Flow.BorrowedStream(capture))
-                    for header in original.Headers do content.Headers.TryAddWithoutValidation(header.Key, header.Value) |> ignore
-                    request.Content <- content
-                    request.Options.Set(captureKey, capture)
-                    try
-                        let! response = next request ct
-                        try return! own response (fun () -> capture.Dispose(); original.Dispose()) ct
-                        with error ->
-                            response.Dispose()
-                            return raise error
-                    with error ->
-                        capture.Dispose()
+                    let mutable prepared: HttpResponseMessage option = None
+                    let mutable captured: Capture option = None
+                    let close () =
+                        captured |> Option.iter _.Dispose()
+                        prepared |> Option.iter _.Dispose()
                         original.Dispose()
+                    try
+                        if worker.PrepareRequests then
+                            let write (stream: Stream) (token: CancellationToken) = original.CopyToAsync(stream, token)
+                            let! response, _ = worker.SendAsync("/request", [ "Content-Type", "application/json" ], write, ct)
+                            prepared <- Some response
+                        match prepared with
+                        | Some response when not response.IsSuccessStatusCode ->
+                            prepared <- None
+                            try return! own response original.Dispose ct
+                            with error ->
+                                response.Dispose()
+                                return raise error
+                        | _ ->
+                            let input = prepared |> Option.map _.Content |> Option.defaultValue original
+                            let! source = input.ReadAsStreamAsync(ct)
+                            let capture = new Capture(source, worker.Folder)
+                            captured <- Some capture
+                            let content = new StreamContent(new Flow.BorrowedStream(capture))
+                            for header in input.Headers do
+                                if not (header.Key.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)) then
+                                    content.Headers.TryAddWithoutValidation(header.Key, header.Value) |> ignore
+                            request.Content <- content
+                            request.Options.Set(captureKey, capture)
+                            let! response = next request ct
+                            try return! own response close ct
+                            with error ->
+                                response.Dispose()
+                                return raise error
+                    with error ->
+                        close ()
                         return raise error
             } }
 
@@ -127,6 +148,7 @@ module Omp =
                     | _ -> raise (InvalidDataException("The OMP decoder has no request context."))
                 try
                     let! length = capture.WaitAsync(ct)
+                    if OmpMetadata.needsRequestPreparation metadata.Recipe then worker.EnableRequestPreparation()
                     let envelope = OmpMetadata.envelope (Contracts.requestPath request) length metadata raw
                     let write (stream: Stream) (token: CancellationToken) : Task = task {
                         let prefix = Array.zeroCreate<byte> 4

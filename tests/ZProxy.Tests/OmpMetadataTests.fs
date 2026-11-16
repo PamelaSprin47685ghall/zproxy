@@ -27,6 +27,19 @@ module OmpMetadataTests =
             let unsafeRecipe = recipe.Substring(0, recipe.Length - 1) + ",\"" + field + "\":\"secret\"}"
             Assert.Throws<InvalidDataException>(fun () -> OmpMetadata.read (metadata unsafeRecipe) |> ignore) |> ignore
 
+    [<Fact>]
+    let ``Antigravity codec metadata carries only a known model family`` () =
+        let ag = recipe.Replace("openai-completions", "antigravity2api").Replace("example", "google-antigravity")
+        for family in [ "google"; "anthropic"; "openai" ] do
+            let value = ag.Replace("\"compat\":{}", "\"compat\":{\"agProvider\":\"" + family + "\"}")
+            Assert.True(OmpMetadata.needsRequestPreparation value)
+            Assert.Equal(value, (OmpMetadata.read (metadata value)).Recipe)
+        for value in [ ag
+                       ag.Replace("\"compat\":{}", "\"compat\":{\"agProvider\":\"unknown\"}")
+                       recipe.Replace("\"compat\":{}", "\"compat\":{\"agProvider\":\"google\"}") ] do
+            Assert.Throws<InvalidDataException>(fun () -> OmpMetadata.read (metadata value) |> ignore) |> ignore
+        Assert.False(OmpMetadata.needsRequestPreparation recipe)
+
     [<Theory>]
     [<InlineData("\"api\":\"openai-completions\"", "\"api\":\"unknown\"")>]
     [<InlineData("\"provider\":\"example\"", "\"provider\":\"\"")>]

@@ -131,10 +131,17 @@ test("the checked OMP patch is idempotent and rejects drift", async () => {
   const copy = await mkdtemp(join(tmpdir(), "zproxy-patch-"));
   const { mkdir } = await import("node:fs/promises");
   await mkdir(join(copy, "packages/ai/src/auth-gateway"), { recursive: true });
-  for (const file of ["dispatch.ts", "server.ts"]) {
-    await writeFile(join(copy, "packages/ai/src/auth-gateway", file), await readFile(join(source, "packages/ai/src/auth-gateway", file)));
+  await mkdir(join(copy, "packages/ai/src/registry/oauth"), { recursive: true });
+  const files = ["packages/ai/src/auth-gateway/dispatch.ts", "packages/ai/src/auth-gateway/server.ts",
+    "packages/ai/src/registry/oauth/index.ts"];
+  for (const file of files) {
+    await writeFile(join(copy, file), await readFile(join(source, file)));
   }
-  await writeFile(join(copy, "packages/ai/src/auth-gateway/dispatch.ts"), "unexpected upstream source");
-  await expect(patchUpstream(copy)).rejects.toThrow("The pinned OMP source changed");
+  expect(await patchUpstream(copy)).toBe(0);
+  for (const file of files) {
+    await writeFile(join(copy, file), "unexpected upstream source");
+    await expect(patchUpstream(copy)).rejects.toThrow("The pinned OMP source changed");
+    await writeFile(join(copy, file), await readFile(join(source, file)));
+  }
   await rm(copy, { recursive: true, force: true });
 });

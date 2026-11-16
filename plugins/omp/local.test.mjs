@@ -232,11 +232,26 @@ describe("the narrow parser contract", () => {
     expect(() => parseRecipe(recipe("openai-completions").replace('"compat":{}', '"compat":{"escapeBuiltinToolNames":true,"escapeBuiltinToolNames":false}'))).toThrow("Duplicate");
   });
 
+  test("admits only the AG provider and a known public codec family", () => {
+    const base = JSON.parse(recipe("openai-completions"));
+    const ag = { ...base, api: "antigravity2api", provider: "google-antigravity", compat: { agProvider: "google" } };
+    for (const family of ["google", "anthropic", "openai"]) {
+      expect(parseRecipe(serializeRecipe({ ...ag, compat: { agProvider: family } })).compat.agProvider).toBe(family);
+    }
+    for (const invalid of [
+      { ...ag, compat: {} }, { ...ag, compat: { agProvider: "unknown" } },
+      { ...ag, provider: "other" }, { ...ag, api: "google-gemini-cli" },
+      { ...ag, compat: { agProvider: "google", projectId: "server-only" } },
+    ]) expect(() => parseRecipe(JSON.stringify(invalid))).toThrow();
+  });
+
   test("normalizes only optional nulls and tool identifier slots", () => {
-    const body = { ...chatRequest, tools: null, metadata: null, messages: [{ role: "assistant", content: null, tool_calls: [{ id: "long-id", type: "function", function: { name: "f", arguments: '{"tool_call_id":"opaque"}' } }] }, { role: "tool", tool_call_id: "long-id", content: "ok" }] };
+    const body = { ...chatRequest, tools: null, metadata: null, _zproxy_ag: { version: 1, messages: [] }, messages: [{ role: "assistant", content: null, tool_calls: [{ id: "long-id", type: "function", function: { name: "f", arguments: '{"tool_call_id":"opaque"}' } }] }, { role: "tool", tool_call_id: "long-id", content: "ok" }] };
     const normalized = normalizeOpenAIRequest("/v1/chat/completions", body);
     expect(normalized.tools).toBeUndefined();
     expect(normalized.metadata).toBeUndefined();
+    expect(normalized._zproxy_ag).toBeUndefined();
+    expect(body._zproxy_ag).toEqual({ version: 1, messages: [] });
     expect(normalized.messages[0].content).toBeNull();
     expect(normalized.messages[0].tool_calls[0].function.arguments).toBe('{"tool_call_id":"opaque"}');
     expect(normalized.messages[0].tool_calls[0].id).toBe(normalized.messages[1].tool_call_id);

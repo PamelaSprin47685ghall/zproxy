@@ -6,6 +6,7 @@
   "discovery": "online-if-uncached",
   "aliases": {},
   "passthroughProviders": [],
+  "antigravity2api": false,
   "headerTimeoutMs": 120000,
   "idleTimeoutMs": 120000,
   "maxRequestBytes": 16777216

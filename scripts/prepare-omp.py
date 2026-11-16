@@ -6,11 +6,9 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import tarfile
-import tempfile
 import zipfile
 
-from bundle_support import PLUGIN, ROOT, download, read_lock, run
+from bundle_support import PLUGIN, ROOT, download, read_lock, run, source_snapshot
 
 
 def prepare_bun(lock, cache, supplied):
@@ -26,44 +24,6 @@ def prepare_bun(lock, cache, supplied):
     if version != lock["bun"]["version"]:
         raise RuntimeError(f"This bundle requires Bun {lock['bun']['version']}.")
     return binary
-
-
-def source_snapshot(spec, cache, supplied, name, paths):
-    expected = spec["commit"]
-    if supplied:
-        source = Path(supplied).resolve()
-        actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-        if actual != expected:
-            raise RuntimeError(f"The supplied {name} checkout is not the pinned revision.")
-    else:
-        source = cache / f"{name}-source"
-        if not (source / ".git").is_dir():
-            source.mkdir(parents=True, exist_ok=True)
-            run(["git", "init", "--quiet", source])
-            run(["git", "remote", "add", "origin", spec["repository"]], cwd=source)
-        origin = subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=source, text=True).strip()
-        if origin != spec["repository"]:
-            raise RuntimeError(f"The {name} source cache has a different origin.")
-        run(["git", "fetch", "--depth", "1", "origin", expected], cwd=source)
-        actual = subprocess.check_output(["git", "rev-parse", "FETCH_HEAD"], cwd=source, text=True).strip()
-        if actual != expected:
-            raise RuntimeError(f"The fetched {name} revision did not match.")
-
-    destination = PLUGIN / "vendor" / name
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f"{name}-source-", dir=destination.parent) as temporary:
-        prepared = Path(temporary) / "source"
-        prepared.mkdir()
-        with tempfile.TemporaryFile() as archive:
-            run(["git", "archive", expected, *paths], cwd=source, stdout=archive)
-            archive.seek(0)
-            with tarfile.open(fileobj=archive, mode="r:") as data:
-                data.extractall(prepared, filter="data")
-        (prepared / "SOURCE_COMMIT").write_text(expected + "\n")
-        if destination.exists():
-            shutil.rmtree(destination)
-        prepared.rename(destination)
-    return destination
 
 
 def link_native():

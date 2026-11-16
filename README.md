@@ -46,20 +46,22 @@ python3 scripts/smoke-native.py --binary artifacts/linux-x64/ZProxy
 
 ### 可选 OMP 与 AppImage
 
-重插件固定使用 OMP **18.20.3**（`67ef5342de6c24587fc59a6dbd3a2ab918510541`）、Bun **1.4.4** 和原 omp-shims **2.0.0**（`34189f420516f5ceeb8373998cc31896553c57ea`）。来源、下载校验值在 [upstream.lock.json](plugins/omp/upstream.lock.json)，npm 版本由冻结的 [bun.lock](plugins/omp/bun.lock) 锁定。构建不会跟随上游移动分支；升级须更新固定版本并重新检查两个窄补丁。
+重插件固定使用 OMP **18.20.3**（`67ef5342de6c24587fc59a6dbd3a2ab918510541`）、Bun **1.4.4**、原 omp-shims **2.0.0**（`34189f420516f5ceeb8373998cc31896553c57ea`）和 Antigravity2API **0.1.8**（`d36920f3e178eb6d94a49c0b184947cb7df8b3b1`）。来源、下载校验值在 [upstream.lock.json](plugins/omp/upstream.lock.json)，npm 版本由冻结的 [bun.lock](plugins/omp/bun.lock) 锁定。构建不会跟随上游移动分支；升级须更新固定版本并重新检查交接补丁和 Go 适配层。
 
 在已有 NativeAOT 产物基础上，使用 Python 3.11 或更新版本：
 
 ```sh
 sudo apt-get install --no-install-recommends -y desktop-file-utils
 python3 scripts/prepare-omp.py
+python3 scripts/prepare-ag2api.py
 plugins/omp/bin/bun run --cwd plugins/omp test
 python3 scripts/smoke-omp.py --binary artifacts/linux-x64/ZProxy --omp-dir plugins/omp
+python3 scripts/smoke-omp.py --binary artifacts/linux-x64/ZProxy --omp-dir plugins/omp --antigravity2api
 python3 scripts/build-appimage.py --binary artifacts/linux-x64/ZProxy
 python3 scripts/smoke-appimage.py --image artifacts/zproxy-omp-linux-x64.AppImage
 ```
 
-AppImage 包含本体、Bun、OMP 运行所需源码和 production npm 包、native addon、Zstd/OpenSSL 及非 glibc 动态依赖。它不要求主机安装 Bun 或 .NET；主机仍提供 Linux 内核、glibc 和 CA 信任根。构建用 `readelf` 计算所需 GLIBC 符号下限，并把结果与二进制 hash、源版本、库版本写入随包的 `bundle.json`。Ubuntu 24.04 是构建基线，实际 ABI 下限以该次产物的 manifest 为准。产物不承诺在任意 Linux 发行版上运行。
+AppImage 包含本体、Bun、OMP 运行所需源码和 production npm 包、native addon、静态 AG 协议 worker、Zstd/OpenSSL 及非 glibc 动态依赖。它不要求主机安装 Bun、Go 或 .NET；主机仍提供 Linux 内核、glibc 和 CA 信任根。构建用 `readelf` 计算所需 GLIBC 符号下限，并把结果与二进制 hash、源版本、库版本写入随包的 `bundle.json`。Ubuntu 24.04 是构建基线，实际 ABI 下限以该次产物的 manifest 为准。产物不承诺在任意 Linux 发行版上运行。
 
 安装 FUSE 时可以直接执行 AppImage；也可以解包运行：
 
@@ -198,6 +200,20 @@ server 与 client 命令分别在远端和本机执行，且沿用前文各自�
 
 `routesFile` 和日志路径按 `shims.json` 所在目录解析。`stateDbPath` 由原配置模块处理；建议使用明确的服务器私有绝对路径。`shimsConfig` 不是把所有旧猴子补丁无条件重新装上：已由官方功能接管的 shim 删除，必须保留的部分在对应边界实现。每项处理和限制见 [OMP_PARITY.md](docs/OMP_PARITY.md)。原路由事件日志属于远端私有诊断；公开 `/reports` 仍只显示昵称及聚合计数。
 
+### Antigravity 使用 Go 协议适配
+
+在远端 `remote.json` 加入以下字段，令路由最终选中的 `google-antigravity` 模型使用 Antigravity2API 的请求与响应规则：
+
+```json
+"antigravity2api": true
+```
+
+默认关闭。启用后，远端仍由现有 OMP 账户库和共享路由选择账户、解析模型、刷新凭据并发起 HTTP 请求；Go 只准备请求正文。原始下行通过原隧道到本机，交给本地 Go worker 解析并输出 OpenAI chat / text completions。客户端从受限的 `antigravity2api` recipe 自动选择该 codec，无需取得服务器配置。两个 Go worker 均按需启动，随所属 OMP worker 关闭。
+
+这条路径不启动 Antigravity2API 自带的账号池、管理服务、数据库或调度器。AG 的模型、provider、账户容量不再套旧路由的固定并发上限，本地 Go 解析也不套普通 OMP 解析器的 4 路限制。zproxy 的每隧道 `--max-streams`、内存额度、取消和背压仍然有效，上游实际返回的 429 和配额状态仍由远端路由处理。它不会把上游拒绝解释成无限重试。
+
+本地缓存匹配当前对话的 thought signature，下一轮把所需签名作为私有请求上下文交回远端。缓存上限 256 条 / 4 MiB、有效期 30 分钟，进程退出即清空；它不含账户凭据。已有工具签名会保留。`reasoning_effort: "none"` 对必须思考的模型只隐藏输出思考；只有目录明确支持关闭的模型才按其 off 路由关闭。完整边界、构建方式和验证见 [AG2API.md](docs/AG2API.md)。
+
 ### 同接口提供方直接通过
 
 对服务器 `models.yml` 中已经提供相同 OpenAI chat 接口的自定义提供方，可在 `remote.json` 显式加入：
@@ -263,7 +279,7 @@ OMP 的 `/v1/completions` 是 text prompt 到 chat 的兼容入口：只接受�
 
 窗口与队列限制不等于进程 RSS 上限。Zstd 上下文、HTTP/TLS 连接池、管道分段及程序本身另占内存；同时隧道数量会增加这些开销。
 
-启用 OMP 后还要计算独立 Bun 进程和模型解析器的内存。原请求在本机以私有临时文件保留供解码使用，上限 64 MiB；远端 JSON 请求默认上限 16 MiB，可在配置中调到至多 64 MiB。本地同时最多解码 4 个响应，单个原始响应上限 128 MiB；请求和非流式结果仍会在 JS 中形成对象。以上是输入和并发边界，不是承诺固定 RSS。
+启用 OMP 后还要计算独立 Bun 进程和模型解析器的内存。原请求在本机以私有临时文件保留供解码使用，上限 64 MiB；远端 JSON 请求默认上限 16 MiB，可在配置中调到至多 64 MiB。普通 OMP 本地解析同时最多 4 路，单个原始响应上限 128 MiB；请求和非流式结果仍会在 JS 中形成对象。选配 AG codec 按需增加 Go 进程，不设 AG 固定并发上限；每个原始响应仍限 128 MiB，累计解码内容和排序缓冲分别限 16 MiB。以上是输入和资源边界，不是承诺固定 RSS。
 
 | 参数 | 角色 | 默认值 | 含义 |
 | --- | --- | --- | --- |
@@ -318,7 +334,7 @@ handler 的调用者持有输入请求，并在最终响应使用完后释放它
 
 `dotnet test zproxy.slnx --configuration Release` 覆盖用户凭据、持久化、管理权限和报告隔离，以及 HTTP 分段、帧、加密、压缩历史、双工、额度、并发、取消、断线不重放、插件短路、recipe 校验和解码器行为。`plugins/omp` 下的 Bun 测试直接使用固定版本官方模块、原路由组件和自有假上游，检查响应交接、格式转换、凭据边界及补丁漂移。
 
-[CI](.github/workflows/ci.yml) 的发布门槛包括：运行两组测试，发布 Linux x64 NativeAOT，运行 [smoke-native.py](scripts/smoke-native.py) 和 [smoke-omp.py](scripts/smoke-omp.py)，构建真实 AppImage，再通过 [smoke-appimage.py](scripts/smoke-appimage.py) 解包验证。解包测试使用包内 Bun/OMP，执行普通转发和 OMP 分拆流程；不依赖主机 Bun 或 .NET。所有上游流量均使用测试自建的 loopback fixture，不使用真实账户。只有这些步骤完成才上传对应产物；当前运行是否通过以 PR 的 CI 结果为准。
+[CI](.github/workflows/ci.yml) 的发布门槛包括：运行 F#、Bun、Go 测试，构建静态 AG worker 并检查私有 Unix HTTP，发布 Linux x64 NativeAOT，运行 [smoke-native.py](scripts/smoke-native.py) 和 [smoke-omp.py](scripts/smoke-omp.py) 的普通 OMP / AG 两种模式，构建真实 AppImage，再通过 [smoke-appimage.py](scripts/smoke-appimage.py) 解包验证。解包测试执行普通转发、OMP 分拆和 AG 全链路；不依赖主机 Bun、Go 或 .NET。AG 测试包括首字提前到达、六个并发文本补全以及下一轮签名恢复。所有上游流量均使用测试自建的 loopback fixture，不使用真实账户。只有这些步骤完成才上传对应产物；当前运行是否通过以 PR 的 CI 结果为准。
 
 目前没有发布吞吐、首字延迟或 RSS 测量结果。缩小窗口会改变可复用的历史，不能单凭参数推断速度和压缩比。一条 TCP 连接中的流可以交错发送，但丢包恢复仍可能让所有流共同等待。
 

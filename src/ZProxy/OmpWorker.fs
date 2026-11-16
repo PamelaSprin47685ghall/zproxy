@@ -39,6 +39,7 @@ module OmpWorker =
         let writers = ConcurrentDictionary<int, Task>()
         let mutable nextCall = 0
         let mutable disposed = 0
+        let mutable prepareRequests = 0
         let mutable started = false
         let mutable output = Task.CompletedTask
         let mutable errors = Task.CompletedTask
@@ -52,6 +53,8 @@ module OmpWorker =
         }
 
         member _.Folder = folder
+        member _.PrepareRequests = Volatile.Read(&prepareRequests) <> 0
+        member _.EnableRequestPreparation() = Interlocked.Exchange(&prepareRequests, 1) |> ignore
         member _.Completion: Task = child.WaitForExitAsync()
 
         member _.StartAsync(ct: CancellationToken) = task {

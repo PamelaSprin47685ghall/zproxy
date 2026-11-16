@@ -38,6 +38,12 @@ jobs:
       - name: Prepare pinned OMP runtime
         run: python3 scripts/prepare-omp.py
 
+      - name: Test and build the pinned AG2API codec worker
+        run: python3 scripts/prepare-ag2api.py
+
+      - name: Run the AG2API codec socket smoke test
+        run: python3 scripts/smoke-ag2api.py --binary plugins/omp/bin/zproxy-ag
+
       - name: Run OMP plugin tests
         working-directory: plugins/omp
         run: bin/bun test ./*.test.mjs --timeout 30000
@@ -70,6 +76,9 @@ jobs:
 
       - name: Run split OMP NativeAOT smoke test
         run: python3 scripts/smoke-omp.py --binary artifacts/linux-x64/ZProxy --omp-dir plugins/omp
+
+      - name: Run AG2API NativeAOT smoke test
+        run: python3 scripts/smoke-omp.py --binary artifacts/linux-x64/ZProxy --omp-dir plugins/omp --antigravity2api
 
       - name: Build self-contained OMP AppImage
         run: python3 scripts/build-appimage.py --binary artifacts/linux-x64/ZProxy

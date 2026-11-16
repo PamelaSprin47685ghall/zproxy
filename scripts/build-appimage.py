@@ -29,6 +29,10 @@ def copy_file(source, destination):
 
 
 def dependencies(binary):
+    program = output(["readelf", "--program-headers", "--wide", binary])
+    dynamic = output(["readelf", "--dynamic", "--wide", binary])
+    if not re.search(r"^\s*INTERP\s", program, re.MULTILINE) and "(NEEDED)" not in dynamic:
+        return {}  # A static Go worker has no shared library or ELF loader.
     result = output(["ldd", binary], env=dict(os.environ, LC_ALL="C"))
     if "not found" in result:
         raise RuntimeError(f"A shared library is missing for {binary.name}:\n{result}")
@@ -121,11 +125,34 @@ def copy_plugin(destination):
         ignored_names = {".git", ".cache", "__pycache__"}
         if Path(directory) == PLUGIN:
             ignored_names.update(set(names) - included)
+        if Path(directory) == PLUGIN / "vendor":
+            ignored_names.add("ag2api")  # Go uses the compiled worker, not its source tree.
         return ignored_names.intersection(names)
 
     shutil.copytree(PLUGIN, destination, symlinks=True, ignore=ignored)
     (destination / "bin").mkdir()
     (destination / "bin/bun").symlink_to(os.path.relpath(destination.parents[2] / "bin/bun", destination / "bin"))
+    copy_file(PLUGIN / "bin/zproxy-ag", destination / "bin/zproxy-ag")
+
+
+def checked_ag_worker(lock):
+    metadata = PLUGIN / "bin/zproxy-ag.bundle.json"
+    if not metadata.is_file():
+        raise RuntimeError("Run scripts/prepare-ag2api.py to build the pinned codec worker first.")
+    manifest = json.loads(metadata.read_text())
+    if manifest["source"] != lock["ag2api"] or manifest["toolchain"] != lock["go"]:
+        raise RuntimeError("The AG2API codec build has different source or toolchain pins.")
+    if not manifest["static"] or manifest["workerSha256"] != sha256(PLUGIN / "bin/zproxy-ag"):
+        raise RuntimeError("The AG2API codec binary does not match its build record.")
+    overlay = PLUGIN / "ag2api"
+    actual = {path.relative_to(overlay).as_posix(): sha256(path) for path in sorted(overlay.rglob("*.go"))}
+    if actual != manifest["overlaySha256"]:
+        raise RuntimeError("The AG2API codec overlay changed after its last build.")
+    notices = PLUGIN / "bin/zproxy-ag-licenses"
+    actual = {path.relative_to(notices).as_posix(): sha256(path) for path in sorted(notices.rglob("*")) if path.is_file()}
+    if actual != manifest["licenseSha256"]:
+        raise RuntimeError("The AG2API codec licenses do not match the build record.")
+    return manifest
 
 
 def check_links(appdir):
@@ -142,6 +169,7 @@ def copy_notices(lock, cache, appdir, dotnet_root):
     destination = appdir / "usr/share/licenses/zproxy-omp"
     copy_file(PLUGIN / "vendor/omp/LICENSE", destination / "OMP-LICENSE")
     copy_file(PLUGIN / "vendor/shims/LICENSE", destination / "omp-shims-LICENSE")
+    shutil.copytree(PLUGIN / "bin/zproxy-ag-licenses", destination / "ag2api")
     for key, name in (("bunLicense", "Bun-LICENSE.md"), ("appImageRuntimeLicense", "AppImage-runtime-LICENSE")):
         copy_file(download(lock[key], cache / name), destination / name)
     for name in ("LICENSE.txt", "ThirdPartyNotices.txt"):
@@ -181,10 +209,12 @@ def main():
     if not binary.is_file() or not os.access(binary, os.X_OK):
         parser.error("--binary must be the published NativeAOT executable.")
     lock = read_lock()
-    for name, pin in (("omp", lock["upstream"]), ("shims", lock["shims"])):
+    for name, pin in (("omp", lock["upstream"]), ("shims", lock["shims"]), ("ag2api", lock["ag2api"])):
         marker = PLUGIN / "vendor" / name / "SOURCE_COMMIT"
         if not marker.is_file() or marker.read_text().strip() != pin["commit"]:
-            raise RuntimeError(f"Run scripts/prepare-omp.py for the pinned {name} revision first.")
+            script = "prepare-ag2api.py" if name == "ag2api" else "prepare-omp.py"
+            raise RuntimeError(f"Run scripts/{script} for the pinned {name} revision first.")
+    ag_worker = checked_ag_worker(lock)
     bun = PLUGIN / "bin/bun"
     if output([bun, "--version"]).strip() != lock["bun"]["version"]:
         raise RuntimeError("The prepared Bun version does not match the lock.")
@@ -212,7 +242,7 @@ def main():
         copy_plugin(plugin)
         license_dir = copy_notices(lock, cache, appdir, dotnet_root.resolve())
         addons = list((plugin / "node_modules/@oh-my-pi/pi-natives-linux-x64").glob("*.node"))
-        binaries = [appdir / "usr/bin/ZProxy", appdir / "usr/bin/bun", *addons]
+        binaries = [appdir / "usr/bin/ZProxy", appdir / "usr/bin/bun", plugin / "bin/zproxy-ag", *addons]
         libraries, platform = bundle_libraries(appdir, binaries, license_dir)
         binaries.extend((appdir / "usr/lib/zproxy/lib").iterdir())
         manifest = {
@@ -224,6 +254,7 @@ def main():
             "zproxySha256": sha256(binary),
             "bunSha256": sha256(bun),
             "nativeAddonSha256": {path.name: sha256(path) for path in addons},
+            "ag2apiWorker": ag_worker,
             "upstream": lock,
             "npmLockSha256": sha256(PLUGIN / "bun.lock"),
             "upstreamPatchSha256": sha256(PLUGIN / "patch-upstream.mjs"),

@@ -16,12 +16,14 @@ import { continueGoogle } from "./remote-google.mjs";
 import { legacyResponse, legacyStream } from "./local-codec.mjs";
 import { createRemoteFeatures, getWireInfo } from "./remote-features.mjs";
 import { createPassthrough } from "./remote-passthrough.mjs";
+import { createAgWorker } from "./ag-worker.mjs";
+import { acquireProviderOptIn } from "./remote-opt-in.mjs";
 
 const PATHS = new Set(["/v1/chat/completions", "/v1/completions"]);
 const HEADER_NAMES = ["content-type", "cache-control", "retry-after", "x-zproxy-decode"];
 const CONFIG_KEYS = new Set(["version", "authDatabase", "modelsFile", "modelCache", "aliases", "providerOrder",
   "disabledProviders", "discovery", "refreshMs", "headerTimeoutMs", "idleTimeoutMs", "maxRequestBytes",
-  "accountPolicies", "defaultReservePct", "shimsConfig", "passthroughProviders"]);
+  "accountPolicies", "defaultReservePct", "shimsConfig", "passthroughProviders", "antigravity2api"]);
 const utf8 = new TextEncoder();
 
 function plain(value, max, label) {
@@ -35,6 +37,8 @@ export function validateConfig(value, base = process.cwd()) {
   if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1) throw new Error("Invalid OMP server configuration version.");
   for (const key of Object.keys(value)) if (!CONFIG_KEYS.has(key)) throw new Error(`Unknown OMP configuration field: ${key}`);
   const config = { ...value };
+  config.antigravity2api ??= false;
+  if (typeof config.antigravity2api !== "boolean") throw new Error("Invalid antigravity2api option.");
   for (const key of ["authDatabase", "modelsFile", "modelCache", "shimsConfig"]) {
     if (config[key] !== undefined) config[key] = resolve(base, plain(config[key], 4096, key));
   }
@@ -124,19 +128,23 @@ export function chunkedResponse(response) {
   }), { status: response.status, headers });
 }
 
-export async function createRemoteGateway(input, { fetch: testFetch, routingFactory } = {}) {
+export async function createRemoteGateway(input, { fetch: testFetch, routingFactory, agWorker: suppliedAgWorker, onWorkerExit } = {}) {
   const config = validateConfig(input);
-  await mkdir(dirname(config.authDatabase), { recursive: true, mode: 0o700 });
-  const storage = await AuthStorage.create(config.authDatabase, {
-    accountPolicies: config.accountPolicies, defaultReservePct: config.defaultReservePct,
-  });
-  await chmod(config.authDatabase, 0o600);
+  const releaseOptIn = config.antigravity2api ? acquireProviderOptIn("google-antigravity") : () => {};
+  let storage;
   let timer;
   let gateway;
   let routing;
   let features;
+  let agWorker;
+  let closing;
   const active = new Set();
   try {
+    await mkdir(dirname(config.authDatabase), { recursive: true, mode: 0o700 });
+    storage = await AuthStorage.create(config.authDatabase, {
+      accountPolicies: config.accountPolicies, defaultReservePct: config.defaultReservePct,
+    });
+    await chmod(config.authDatabase, 0o600);
     await storage.credentials.reload();
     const registry = new ModelRegistry(storage, config.modelsFile, { cacheDbPath: config.modelCache, fetch: testFetch });
     if (registry.getError()) throw new Error("The server models file is invalid.");
@@ -176,8 +184,17 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
     });
     const passthrough = createPassthrough({ config, storage, registry, resolveModel, fetch: testFetch,
       observeTurn: model => routing?.observeTurn?.(model) ?? {}, usesCustomTransport: model => features.usesCustomTransport(model) });
+    let antigravity;
+    if (config.antigravity2api) {
+      const { createAntigravity } = await import("./remote-antigravity.mjs");
+      agWorker = suppliedAgWorker ?? createAgWorker({ onExit: onWorkerExit });
+      antigravity = createAntigravity({ config, storage, registry, resolveModel, fetch: testFetch,
+        prepare: (value, options) => agWorker.prepare(value, options),
+        observeTurn: model => routing?.observeTurn?.(model) ?? {} });
+    }
     const dispatch = (request, peer, scope) => features.dispatch(request, peer, scope,
-      async (request, peer, scope) => await passthrough(request, scope) ?? gateway.route(request, peer, scope));
+      async (request, peer, scope) => await antigravity?.(request, scope)
+        ?? await passthrough(request, scope) ?? gateway.route(request, peer, scope));
     if (routingFactory) routing = await routingFactory({ config, storage, registry, dispatch, resolveModel });
     else if (config.shimsConfig) {
       const { createRemoteRouting } = await import("./remote-routing.mjs");
@@ -196,6 +213,7 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
         catch { return Response.json({ error: "Authenticated IPC identity required." }, { status: 401 }); }
         try {
           const original = await readBody(request, config.maxRequestBytes);
+          scope.antigravityContext = original?._zproxy_ag;
           scope.completionPath = url.pathname;
           scope.toolIds = buildToolIdMap(original);
           body = normalizeOpenAIRequest(url.pathname, original);
@@ -242,22 +260,30 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
           },
         }), { status: result.status, headers: result.headers });
       },
-      async close() {
-        clearInterval(timer);
-        for (const controller of active) controller.abort(new DOMException("The gateway stopped.", "AbortError"));
-        active.clear();
-        await routing?.close?.();
-        gateway.close();
-        await features.close();
-        storage.close();
+      close() {
+        return closing ??= (async () => {
+          try {
+            clearInterval(timer);
+            for (const controller of active) controller.abort(new DOMException("The gateway stopped.", "AbortError"));
+            active.clear();
+            await routing?.close?.();
+            gateway.close();
+            await features.close();
+            await agWorker?.close();
+            storage.close();
+          } finally { releaseOptIn(); }
+        })();
       },
     };
   } catch (error) {
-    clearInterval(timer);
-    await routing?.close?.();
-    gateway?.close();
-    await features?.close();
-    storage.close();
+    try {
+      clearInterval(timer);
+      await routing?.close?.();
+      gateway?.close();
+      await features?.close();
+      await agWorker?.close();
+      storage?.close();
+    } finally { releaseOptIn(); }
     throw error;
   }
 }
@@ -270,7 +296,7 @@ async function main() {
   const text = await readFile(configPath, "utf8");
   if (utf8.encode(text).length > 1048576) throw new Error("The OMP server configuration exceeds its limit.");
   const config = validateConfig(JSON.parse(text), dirname(configPath));
-  const app = await createRemoteGateway(config);
+  const app = await createRemoteGateway(config, { onWorkerExit: () => process.exit(1) });
   let stopping = false;
   let server;
   const stop = async () => {

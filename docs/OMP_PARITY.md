@@ -11,8 +11,9 @@
 | OMP | `18.20.3`，`67ef5342de6c24587fc59a6dbd3a2ab918510541` | [官方源代码](https://github.com/can1357/oh-my-pi/tree/67ef5342de6c24587fc59a6dbd3a2ab918510541) |
 | omp-shims | `2.0.0`，`34189f420516f5ceeb8373998cc31896553c57ea` | [13 项功能及默认配置](https://github.com/PamelaSprin47685ghall/omp-shims/blob/34189f420516f5ceeb8373998cc31896553c57ea/lib/config.mjs) |
 | Bun | `1.4.4` | [构建锁文件](../plugins/omp/upstream.lock.json) |
+| Antigravity2API（选配） | `0.1.8`，`d36920f3e178eb6d94a49c0b184947cb7df8b3b1` | [固定源码](https://github.com/Mag1cFall/Antigravity2API/tree/d36920f3e178eb6d94a49c0b184947cb7df8b3b1)、[适配边界](AG2API.md) |
 
-构建下载固定提交，检查版本和摘要，再应用两处有前后摘要检查的 gateway 交接补丁。上游源文件变化时，构建失败，不能把旧补丁盲目应用到新版 OMP。补丁只增加交接接口和调用位置，不复制 provider 解析器。[补丁实现](../plugins/omp/patch-upstream.mjs)
+构建下载固定提交，检查版本和摘要，再应用有前后摘要检查的 gateway 交接及 opt-in 状态读取补丁。上游源文件变化时，构建失败，不能把旧补丁盲目应用到新版 OMP。补丁不复制 provider 解析器。选配 AG codec 的 Go 适配文件在固定模块内编译，复用原协议包。[补丁实现](../plugins/omp/patch-upstream.mjs)、[Go 构建](../scripts/prepare-ag2api.py)
 
 ## 13 项旧功能逐一处理
 
@@ -54,6 +55,7 @@
 | `anthropic-messages` | 原始 Messages SSE | 官方 `streamAnthropic` |
 | `google-generative-ai`、`google-vertex` | 原始 Google SSE | 官方 `streamGoogle` |
 | `google-gemini-cli` | 原始 CCA 封装 SSE | 官方 `streamGoogleGeminiCli` |
+| 启用 `antigravity2api` 后的 `google-antigravity` | 远端 OMP 账户与路由、Go 请求准备，交接原始 AG SSE | 本地 Go 复用 Antigravity2API 的 decoder、输出规则与 OpenAI 字段映射 |
 | Bedrock、Cursor、Ollama、CLI/ACP、Apple 等其他 API | 保留官方远端完整处理 | 本地直接透传官方 OpenAI 结果 |
 | 插件自定义 transport，包括覆盖标准 API 名称的实现 | 保留官方远端完整处理 | 不假定其网络请求可被 fetch 接口拦截 |
 
@@ -69,7 +71,7 @@ Google 的 `CONTINUATION` 属于协议控制，需要服务端凭据继续请求
 
 仅接受 OpenAI `/v1/chat/completions` 和 `/v1/completions`。不对外提供 Anthropic Messages、Responses、模型管理或任意目标代理接口。
 
-Chat 的 streaming 与非 streaming 都使用官方 OpenAI 编码器，保留文本、reasoning、工具调用和参数、Google thought signature、finish reason、错误和 usage。非 streaming 请求仍可在远端请求原始 SSE，由本地汇总最终 JSON。
+普通 OMP 路径的 Chat streaming 与非 streaming 使用官方 OpenAI 编码器，保留文本、reasoning、工具调用和参数、Google thought signature、finish reason、错误和 usage。选配 AG 路径使用 Antigravity2API 的输出规则和 OpenAI 字段映射，账户和共享路由仍留在 OMP；具体差别见 [AG2API.md](AG2API.md)。非 streaming 请求仍可在远端请求原始 SSE，由本地汇总最终 JSON。
 
 旧 `/v1/completions` 接受一个文本 prompt，或只含一个文本的数组，`n` 为 1。它经官方 Chat 请求/响应适配后输出 `text_completion`。批量 prompt、token ID prompt、`echo`、`suffix`、`logprobs`、`best_of > 1` 和 `n > 1` 不做不可靠模拟，明确拒绝。只提供 Chat 的上游不天然具有旧文本补全接口的所有能力。[入口与限制](../plugins/omp/contract.mjs)
 
@@ -77,7 +79,7 @@ Chat 的 streaming 与非 streaming 都使用官方 OpenAI 编码器，保留文
 
 安全 recipe 只包含固定 API 枚举、公开 provider/model 名、输入类型、模型容量和少数已列举的解析兼容开关。F# 与 JS 两端拒绝未知字段、重复字段、控制字符和越界值。禁止 URL、header、API key、OAuth token、credential ID、账户快照和任意 options 包。recipe 最多 8 KiB，私有 IPC 的上下文 envelope 最多 64 KiB。[契约](../plugins/omp/contract.mjs)、[F# 校验](../src/ZProxy/OmpMetadata.fs)
 
-原请求最多 64 MiB，由本地 F# 保存到私有临时文件；关闭响应或取消请求会清理。Bun 本地工作进程最多同时解析 4 个响应，每个原始响应最多 128 MiB。选配的 reasoning 排序另有 16 MiB 上限。OMP 的官方事件对象和最终 message 仍需要内存；这些限制不等于常数内存，也不代表已经测得某个固定的内存下降比例。
+原请求最多 64 MiB，由本地 F# 保存到私有临时文件；关闭响应或取消请求会清理。普通 Bun 本地解析最多同时 4 路，每个原始响应最多 128 MiB。选配 AG codec 在 Go 中解析，不设 AG 固定并发上限；原始响应仍限 128 MiB，累计解码内容限 16 MiB。两者的选配 reasoning 排序另有 16 MiB 上限。事件对象和最终 message 仍需要内存；这些限制不等于常数内存，也不代表已经测得某个固定的内存下降比例。[AG 接入与签名缓存](AG2API.md)
 
 验证包括五类官方响应解析器的实际 wire fixture、reasoning 与工具参数、原 ID 恢复、Google signature、usage、错误与截断、取消、字节上限、严格 recipe、Copilot 跨协议工具历史、Kiro 官方存储调用、真实插件导入及初始化超时清理。私有 Unix HTTP 测试要求请求体尚未 EOF 时已经收到响应；`smoke-omp.py` 则用本地假上游启动真实 NativeAOT server/client 与两个 Bun worker，检查转换后的内容提前到达、并发请求、远端认证头、公开昵称统计、原始字节统计和子进程退出。
 

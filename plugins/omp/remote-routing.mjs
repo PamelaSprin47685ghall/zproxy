@@ -121,6 +121,13 @@ export async function createRemoteRouting({ config, storage, registry, dispatch,
   const loaded = loadPlanData(settings.routesFile ? resolve(base, settings.routesFile) : undefined);
   const planData = { ...loaded, maxInFlight: { ...loaded.maxInFlight, ...settings.maxInFlight } };
   const policy = new ComposedPolicy(planData);
+  if (config.antigravity2api) {
+    const limit = policy.maxInFlight.bind(policy);
+    policy.maxInFlight = unit => {
+      const key = typeof unit === "string" ? unit : unit?.key ?? unit?.provider;
+      return typeof key === "string" && /^google-antigravity(?:$|[/#])/.test(key) ? 0 : limit(unit);
+    };
+  }
   let emit = () => {};
   if (settings.out) {
     const path = resolve(base, settings.out);

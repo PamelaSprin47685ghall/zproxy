@@ -5,6 +5,7 @@ export const RECIPE_LIMIT = 8192;
 export const CODEC_APIS = Object.freeze([
   "openai-completions", "openai-responses", "anthropic-messages",
   "google-generative-ai", "google-gemini-cli",
+  "antigravity2api",
 ]);
 const API_MAP = Object.freeze({
   "openai-completions": "openai-completions",
@@ -23,7 +24,7 @@ const BOOLEAN_COMPAT = Object.freeze([
   "escapeBuiltinToolNames", "flashStreamLeakWorkaround",
 ]);
 const RECIPE_KEYS = new Set(["api", "provider", "id", "reasoning", "input", "contextWindow", "maxTokens", "compat"]);
-const COMPAT_KEYS = new Set([...BOOLEAN_COMPAT, "streamMarkupHealingPattern", "toolNamePrefix"]);
+const COMPAT_KEYS = new Set([...BOOLEAN_COMPAT, "streamMarkupHealingPattern", "toolNamePrefix", "agProvider"]);
 const MARKUP = new Set(["thinking", "kimi", "dsml", "qwen"]);
 const utf8 = new TextEncoder();
 
@@ -83,7 +84,11 @@ export function parseRecipe(text) {
     if (BOOLEAN_COMPAT.includes(key) && typeof item !== "boolean") throw new Error(`Invalid ${key}.`);
     if (key === "streamMarkupHealingPattern" && item !== null && !MARKUP.has(item)) throw new Error("Invalid markup parser.");
     if (key === "toolNamePrefix") plainName(item, 64, "tool name prefix", true);
+    if (key === "agProvider" && !["google", "anthropic", "openai"].includes(item)) throw new Error("Invalid Antigravity model family.");
   }
+  if (value.api === "antigravity2api") {
+    if (value.provider !== "google-antigravity" || !value.compat.agProvider) throw new Error("Invalid Antigravity recipe.");
+  } else if (value.compat.agProvider !== undefined) throw new Error("Unexpected Antigravity model family.");
   return value;
 }
 
@@ -144,6 +149,7 @@ export function buildToolIdMap(body) {
 export function normalizeOpenAIRequest(path, body) {
   record(body, "OpenAI request");
   const result = structuredClone(body);
+  delete result._zproxy_ag;
   if (result.tools === null) delete result.tools;
   if (result.metadata === null) delete result.metadata;
   if (path === "/v1/completions") {

@@ -5,8 +5,11 @@ const MAX_EVENT = 1048576;
 const MAX_SEGMENTS = 128;
 const COUNTS = ["promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount", "totalTokenCount", "cachedContentTokenCount"];
 
-async function* events(body) {
+async function* events(body, signal) {
   const reader = body.getReader();
+  const stop = () => { void reader.cancel(signal.reason).catch(() => {}); };
+  if (signal.aborted) stop();
+  else signal.addEventListener("abort", stop, { once: true });
   let parts = [];
   let length = 0;
   let lineHasData = false;
@@ -39,6 +42,7 @@ async function* events(body) {
     }
     if (length) yield Buffer.concat(parts, length);
   } finally {
+    signal.removeEventListener("abort", stop);
     try { await reader.cancel(); } catch {}
     reader.releaseLock();
   }
@@ -64,18 +68,20 @@ export function continueGoogle(response, turn) {
   if (!["google-generative-ai", "google-gemini-cli", "google-vertex"].includes(turn.model.api)) return response;
   if (typeof turn.init.body !== "string") throw new Error("The Google request body cannot be resumed.");
   let original;
+  const controller = new AbortController();
+  const signal = AbortSignal.any([turn.signal, controller.signal]);
   const cli = turn.model.api === "google-gemini-cli";
   const url = turn.input instanceof Request ? turn.input.url : String(turn.input);
   const resume = async token => {
     original ??= JSON.parse(turn.init.body);
     const body = cli ? { ...original, request: { ...original.request, continuationToken: token } } : { ...original, continuationToken: token };
     const next = await fetchWithRetry(url, {
-      ...turn.init, method: "POST", body: JSON.stringify(body), signal: turn.signal,
+      ...turn.init, method: "POST", body: JSON.stringify(body), signal,
       maxAttempts: 4, maxDelayMs: 60000, defaultDelayMs: attempt => 1000 * 2 ** attempt, timeout: false,
       fetch: async (input, init) => {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(new Error("A continuation request timed out.")), turn.headerTimeoutMs);
-        try { return await turn.fetch(input, { ...init, signal: AbortSignal.any([turn.signal, controller.signal]) }); }
+        try { return await turn.fetch(input, { ...init, signal: AbortSignal.any([signal, controller.signal]) }); }
         finally { clearTimeout(timer); }
       },
     });
@@ -91,7 +97,7 @@ export function continueGoogle(response, turn) {
     for (let count = 0; count < MAX_SEGMENTS; count++) {
       let token;
       let segmentUsage;
-      for await (const bytes of events(segment.body)) {
+      for await (const bytes of events(segment.body, signal)) {
         if (!bytes.includes('"continuationToken"') && !bytes.includes('"usageMetadata"')) { yield bytes; continue; }
         const value = eventValue(bytes);
         const data = cli ? value?.response : value;
@@ -111,6 +117,7 @@ export function continueGoogle(response, turn) {
         }
         yield changed ? Buffer.from(`data: ${JSON.stringify(value)}\n\n`) : bytes;
       }
+      if (signal.aborted) throw signal.reason;
       if (!token) return;
       earlierUsage = sumUsage(earlierUsage ?? {}, segmentUsage ?? {});
       if (count + 1 >= MAX_SEGMENTS) throw new Error("The Google generation exceeds its segment limit.");
@@ -128,6 +135,6 @@ export function continueGoogle(response, turn) {
         else controller.enqueue(item.value);
       } catch (error) { controller.error(error); }
     },
-    async cancel() { await iterator.return(); },
+    async cancel(reason) { controller.abort(reason); await iterator.return(); },
   }), { status: response.status, headers: response.headers });
 }

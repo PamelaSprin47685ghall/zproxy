@@ -42,7 +42,7 @@ module OmpMetadata =
         fields keys keys value
         let api = text 64 (value.GetProperty("api"))
         if not (List.contains api [ "openai-completions"; "openai-responses"; "anthropic-messages";
-                                   "google-generative-ai"; "google-gemini-cli" ]) then fail ()
+                                   "google-generative-ai"; "google-gemini-cli"; "antigravity2api" ]) then fail ()
         if text 128 (value.GetProperty("provider")) = "" || text 256 (value.GetProperty("id")) = "" then fail ()
         boolean (value.GetProperty("reasoning")) |> ignore
         positive Int32.MaxValue (value.GetProperty("contextWindow")) |> ignore
@@ -55,12 +55,23 @@ module OmpMetadata =
         let compat = value.GetProperty("compat")
         let flags = [ "mistralReasoningContentParts"; "stripDeepseekSpecialTokens"; "reasoningDeltasMayBeCumulative";
                       "emptyLengthFinishIsContextError"; "escapeBuiltinToolNames"; "flashStreamLeakWorkaround" ]
-        fields [] (flags @ [ "streamMarkupHealingPattern"; "toolNamePrefix" ]) compat
+        fields [] (flags @ [ "streamMarkupHealingPattern"; "toolNamePrefix"; "agProvider" ]) compat
         for property in compat.EnumerateObject() do
             if List.contains property.Name flags then boolean property.Value |> ignore
             elif property.Name = "toolNamePrefix" then text 64 property.Value |> ignore
+            elif property.Name = "agProvider" then
+                if not (List.contains (text 16 property.Value) [ "google"; "anthropic"; "openai" ]) then fail ()
             elif property.Value.ValueKind <> JsonValueKind.Null then
                 if not (List.contains (text 16 property.Value) [ "thinking"; "kimi"; "dsml"; "qwen" ]) then fail ()
+        let hasFamily, _ = compat.TryGetProperty("agProvider")
+        if api = "antigravity2api" then
+            if not hasFamily || text 128 (value.GetProperty("provider")) <> "google-antigravity" then fail ()
+        elif hasFamily then fail ()
+
+    let needsRequestPreparation (recipe: string) =
+        validateRecipe recipe
+        use document = JsonDocument.Parse(recipe)
+        document.RootElement.GetProperty("api").GetString() = "antigravity2api"
 
     let read (bytes: byte[]) : Contracts.DecodeMetadata =
         try
