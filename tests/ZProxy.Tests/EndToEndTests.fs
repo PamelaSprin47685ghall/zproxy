@@ -639,7 +639,7 @@ module EndToEndTests =
         let openAiBody = "{\"choices\":[{\"text\":\"hello\"}],\"usage\":{\"total_tokens\":2}}"
         let metadata: Contracts.DecodeMetadata =
             { Decoder = "fixture-provider"; Version = 7; ModelAlias = "shared-public-model"
-              RequestId = "decoder-request"; Attempt = 2; IsStreaming = false }
+              RequestId = "decoder-request"; Attempt = 2; IsStreaming = false; Recipe = "" }
         let mutable remoteCalls = 0
         let mutable localCalls = 0
         let handler: RemoteHandler = fun identity request token -> task {

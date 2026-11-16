@@ -65,7 +65,7 @@ module ProtocolTests =
     let ``Response metadata has fixed fields and bounded UTF-8 lengths`` () =
         let boundary =
             { metadata with Decoder = String('d', 64); Version = 65535; ModelAlias = String('m', 128)
-                            RequestId = String('r', 64); Attempt = 65535 }
+                            RequestId = String('r', 64); Attempt = 65535; Recipe = String('x', 8192) }
         let frame value = Frame.ResponseHeaders(1u, 200, 2uy, [], value, false)
         Assert.Equal(frame boundary, Frame.decode (Frame.encode (frame boundary)) |> unwrap)
         let rejected =
@@ -80,11 +80,15 @@ module ProtocolTests =
               { metadata with RequestId = String('r', 65) }
               { metadata with RequestId = null }
               { metadata with Attempt = 0 }
-              { metadata with Attempt = 65536 } ]
+              { metadata with Attempt = 65536 }
+              { metadata with Recipe = null }
+              { metadata with Recipe = "recipe\ncontrol" }
+              { metadata with Recipe = String('x', 8193) }
+              { metadata with Recipe = String('\u754c', 2731) } ]
         for value in rejected do
             Assert.Throws<InvalidDataException>(fun () -> Frame.encode (frame value) |> ignore) |> ignore
         let encoded = Frame.encode (frame metadata)
-        for offset, value in [ 13, 2uy; 16, 0xffuy; encoded.Length - 1, 2uy ] do
+        for offset, value in [ 13, 3uy; 16, 0xffuy; encoded.Length - 3, 2uy ] do
             let bad = Array.copy encoded
             bad[offset] <- value
             Assert.True((Frame.decode bad).IsError)
@@ -95,7 +99,7 @@ module ProtocolTests =
         Array.Clear(badVersion, 16 + Encoding.UTF8.GetByteCount(metadata.Decoder), 2)
         Assert.True((Frame.decode badVersion).IsError)
         let badAttempt = Array.copy encoded
-        Array.Clear(badAttempt, badAttempt.Length - 3, 2)
+        Array.Clear(badAttempt, badAttempt.Length - 5, 2)
         Assert.True((Frame.decode badAttempt).IsError)
 
     [<Fact>]

@@ -82,14 +82,14 @@ module Program =
                 else
                     let common =
                         set [ "--listen"; "--upload-window-log"; "--download-window-log"
-                              "--max-streams"; "--stream-window-bytes" ]
+                              "--max-streams"; "--stream-window-bytes"; "--omp"; "--omp-dir"; "--bun" ]
                     let allowed =
                         if role = "client" then
-                            Set.union common (set [ "--server"; "--uuid-env"; "--connect-timeout-seconds" ])
+                            Set.union common (set [ "--server"; "--uuid-env"; "--connect-timeout-seconds"; "--omp-reasoning-order" ])
                         else
                             Set.union common (set [ "--max-tunnels"; "--max-user-tunnels"; "--handshake-timeout-seconds";
                                                    "--admin-password-env"; "--gateway"; "--gateway-token-env";
-                                                   "--data-dir"; "--web-listen" ])
+                                                   "--data-dir"; "--web-listen"; "--omp-config" ])
                     let mutable values = Map.empty
                     let mutable index = 1
                     while index < args.Length do
@@ -100,12 +100,33 @@ module Program =
                             reject $"Unsupported {role} option. See --help."
                         if values.ContainsKey(name) then
                             reject $"Option '{name}' is repeated."
-                        if index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal) then
-                            reject $"Option '{name}' needs a value."
-                        values <- values.Add(name, args[index + 1])
-                        index <- index + 2
+                        if name = "--omp" || name = "--omp-reasoning-order" then
+                            values <- values.Add(name, "true")
+                            index <- index + 1
+                        else
+                            if index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal) then
+                                reject $"Option '{name}' needs a value."
+                            values <- values.Add(name, args[index + 1])
+                            index <- index + 2
 
                     let value name fallback = Map.tryFind name values |> Option.defaultValue fallback
+                    let omp =
+                        if values.ContainsKey("--omp") then
+                            for name in [ "--omp-dir"; "--bun"; "--omp-config" ] do
+                                match Map.tryFind name values with
+                                | Some path when String.IsNullOrWhiteSpace(path) -> reject $"{name} needs a path."
+                                | _ -> ()
+                            let config = Map.tryFind "--omp-config" values
+                            if role = "server" && config.IsNone then reject "--omp needs --omp-config on the server."
+                            if values.ContainsKey("--gateway") || values.ContainsKey("--gateway-token-env") then
+                                reject "Use either --omp or --gateway."
+                            Some ({ Directory = value "--omp-dir" ""
+                                    Bun = value "--bun" ""; Config = config
+                                    ReasoningOrder = values.ContainsKey("--omp-reasoning-order") }: Options.OmpOptions)
+                        else
+                            if [ "--omp-dir"; "--bun"; "--omp-config"; "--omp-reasoning-order" ] |> List.exists values.ContainsKey then
+                                reject "OMP options need --omp."
+                            None
                     let number name fallback minimum maximum =
                         value name (string fallback) |> integer name minimum maximum
                     let listen =
@@ -133,7 +154,8 @@ module Program =
                                   CryptographicOperations.ZeroMemory(credential.Key.AsSpan())
                                   { Options.client listen server uuid with
                                       Limits = limits
-                                      ConnectTimeout = timeout } }
+                                      ConnectTimeout = timeout
+                                      Omp = omp } }
                         Ok (StartClient options)
                     else
                         let maxTunnels = number "--max-tunnels" 16 1 1024
@@ -143,9 +165,10 @@ module Program =
                             match Map.tryFind "--gateway" values with
                             | Some value ->
                                 match Uri.TryCreate(value, UriKind.Absolute) with
-                                | true, uri when HttpUtils.validGateway uri -> uri
+                                | true, uri when HttpUtils.validGateway uri -> Some uri
                                 | _ -> reject "--gateway must name a fixed HTTP or HTTPS authority without credentials or a path."
-                            | None -> reject "The server needs --gateway for its remote OMP or OpenAI gateway."
+                            | None when omp.IsSome -> None
+                            | None -> reject "The server needs --gateway or --omp with --omp-config."
                         let directory = value "--data-dir" "data"
                         if String.IsNullOrWhiteSpace(directory) then reject "--data-dir must name a private directory."
                         let webListen = value "--web-listen" "127.0.0.1:18081" |> endpoint
@@ -157,12 +180,13 @@ module Program =
                                   { Options.server listen password with
                                       DataDirectory = directory
                                       WebListen = webListen
-                                      Gateway = Some gateway
+                                      Gateway = gateway
                                       GatewayToken = gatewayToken
                                       Limits = limits
                                       MaxTunnels = maxTunnels
                                       MaxUserTunnels = maxUserTunnels
-                                      HandshakeTimeout = timeout } }
+                                      HandshakeTimeout = timeout
+                                      Omp = omp } }
                         Ok (StartServer options)
         with :? ArgumentException as error -> Error error.Message
 
@@ -181,6 +205,7 @@ module Program =
 Usage:
   zproxy client --server http://host[:port] [options]
   zproxy server --gateway http://remote-omp:port [options]
+  zproxy server --omp --omp-config remote.json [options]
 
 Common options:
   --listen IP:port                  Client: 127.0.0.1:18080; server: 0.0.0.0:80
@@ -188,6 +213,10 @@ Common options:
   --download-window-log N           10..23; default: 20
   --max-streams N                   1..256; default: 16
   --stream-window-bytes N           16384..4194304; default: 262144
+  --omp                            Enable the optional bundled OMP worker
+  --omp-dir PATH                   Bundle directory; default: ZPROXY_OMP_DIR or ./omp beside the executable
+  --omp-reasoning-order            Client only: hold visible output until reasoning is complete
+  --bun PATH                       Bun executable; default: ZPROXY_BUN or the bundled bin/bun
 Client options:
   --uuid-env NAME                   User UUID variable; default: ZPROXY_USER_UUID
   --connect-timeout-seconds N       Greater than 0, at most 3600; default: 15
@@ -195,6 +224,7 @@ Server options:
   --admin-password-env NAME         Admin password variable; default: ZPROXY_ADMIN_PASSWORD
   --gateway URL                    Fixed remote OMP/OpenAI gateway authority; required
   --gateway-token-env NAME          Optional remote-only gateway bearer token variable
+  --omp-config PATH                Private remote OMP configuration; required with --omp
   --data-dir PATH                  Private users and statistics; default: data
   --web-listen IP:port              Admin and public reports; default: 127.0.0.1:18081
   --max-tunnels N                   1..1024; default: 16
@@ -231,8 +261,8 @@ The web listener exposes public /reports and password-protected /admin."""
                         | Error message -> reject message
                     let work =
                         match command with
-                        | StartClient options -> Client.run (resolve options) [] stop.Token :> Task
-                        | StartServer options -> Server.run (resolve options) stop.Token :> Task
+                        | StartClient options -> Omp.runClient (resolve options) stop.Token
+                        | StartServer options -> Omp.runServer (resolve options) stop.Token
                         | Help -> Task.CompletedTask
                     work.GetAwaiter().GetResult()
                     0

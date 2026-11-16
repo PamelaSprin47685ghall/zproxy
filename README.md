@@ -1,24 +1,31 @@
 # zproxy
 
-zproxy 把 OpenAI completions 请求和响应压缩、加密，通过一条 HTTP/1.1 长连接传输。一个 F# / .NET 10 程序提供 `client` 和 `server` 两个角色，支持发布为 Linux x64 NativeAOT 程序。
+zproxy 把 OpenAI completions 请求和响应压缩、加密，通过一条 HTTP/1.1 长连接传输。F# / .NET 10 NativeAOT 本体提供 `client` 和 `server` 两个角色。可选 OMP 重插件把账户、路由留在远端，把支持的上游响应解析和 OpenAI 输出转换放到本机。
 
-当前实现使用 **v3 协议**，两端必须一起升级。每位用户使用独立 UUID；管理主密码和上游凭据留在服务器。旧的共享口令配置和在本地路径中嵌入目标地址的用法已删除。完整传输格式见 [PROTOCOL.md](docs/PROTOCOL.md)。
+当前实现使用 **v4 协议**，两端必须一起升级。v3 的用户和统计数据文件可继续使用，不必重新发 UUID。每位用户使用独立 UUID；管理主密码和上游凭据留在服务器。完整传输格式见 [PROTOCOL.md](docs/PROTOCOL.md)。
 
 ## 数据与职责
 
 | 部分 | 当前职责 |
 | --- | --- |
-| 本机 client | 提供两个 completion 入口，维护一条按需建立的隧道，组合可选的本地插件和下行解码器 |
-| 远端 server | 认证用户、限制连接、记录统计，将请求发给配置好的固定网关 |
-| 远端 OMP 或兼容网关 | 持有上游账户凭据，负责账号选择、刷新、模型路由、重试决策和共享健康信息 |
+| 本机 client | 提供两个 completion 入口，维护一条按需建立的隧道；启用 OMP 时调用本地官方响应解析器和 OpenAI 编码器 |
+| 远端 server | 认证用户、限制连接、记录统计，调用固定网关或同机 OMP worker |
+| 远端 OMP | 持有上游账户凭据，负责账号选择、刷新、模型路由、重试和共享健康信息；交接原始下行及受限的解析说明 |
 
 应用使用 `http://127.0.0.1:18080/v1` 作为 base URL。本地只接受 `POST /v1/chat/completions` 和 `POST /v1/completions`，不接受查询参数、其他方法或其他路径；例如 `/v1/models` 不在本次接口范围内。
 
 client 与 server 之间是一个 `POST /tunnel` 和一个长时间保持的 `200` 响应，两边的 chunked body 同时流动。多个逻辑请求用流编号共享这一 HTTP 交换。没有 WebSocket、HTTP Upgrade、CONNECT 或 HTTPS 证书拦截。外层使用 HTTP，正文中的请求帧和响应帧经过 Zstd 压缩与 ChaCha20-Poly1305 加密。
 
-每个方向保留自己的 Zstd 历史，直到隧道关闭。本体不解析 `model`、`messages` 或 SSE 事件中的模型语义。服务器到固定网关使用普通 HTTP 或 HTTPS，共享一个 HTTP 连接池；允许 HTTP/3，并按平台、目标服务和协商结果回落到 HTTP/2 或 HTTP/1.1。
+每个方向保留自己的 Zstd 历史，直到隧道关闭。本体不解析 `model`、`messages` 或 SSE 事件中的模型语义。默认 `--gateway` 模式把请求发给已有的 OpenAI 兼容网关，共享一个 HTTP 连接池；允许 HTTP/3，并按平台、目标服务和协商结果回落到 HTTP/2 或 HTTP/1.1。
 
-**默认网关必须已经提供 OpenAI completions 响应。** 当前内建的 `openai-completions` v1 解码器直接返回这些字节，因此尚未把 OMP 的解析、转换 CPU 工作移到本机。原始下行加元数据的接口已经预留，OMP 重插件、对应的远端接入补丁、Bun/JS 运行时与 AppImage 打包仍未实现。
+两种运行方式如下：
+
+| 方式 | server 参数 | client 参数 | 下行转换 |
+| --- | --- | --- | --- |
+| 本体直通，默认方式 | `--gateway URL` | 不加 `--omp` | 网关必须已经提供 OpenAI completions；本体传输原字节 |
+| 可选 OMP 重插件 | `--omp --omp-config FILE` | `--omp` | 支持的上游 SSE 在本机由官方 OMP 解析；特殊传输保留官方远端处理 |
+
+重插件使用**独立 Bun 进程**，通过权限受限的 Unix socket 与 F# 通信。它不嵌入 JS 引擎，也不依赖 `libbun`。本机 worker 没有远端账户库、认证参数或真实上游 URL；它只接收原请求、原始响应和固定字段的解析说明。未启用插件时不启动 Bun 或 OMP。逐项 shim 去留与特殊传输范围见 [OMP_PARITY.md](docs/OMP_PARITY.md)。
 
 ## 构建
 
@@ -26,7 +33,7 @@ client 与 server 之间是一个 `POST /tunnel` 和一个长时间保持的 `20
 
 ```sh
 sudo apt-get update
-sudo apt-get install --no-install-recommends -y clang libzstd-dev zlib1g-dev
+sudo apt-get install --no-install-recommends -y clang libzstd-dev zlib1g-dev libssl-dev
 dotnet restore zproxy.slnx
 dotnet test zproxy.slnx --configuration Release --no-restore
 dotnet publish src/ZProxy/ZProxy.fsproj --configuration Release \
@@ -35,7 +42,34 @@ dotnet publish src/ZProxy/ZProxy.fsproj --configuration Release \
 python3 scripts/smoke-native.py --binary artifacts/linux-x64/ZProxy
 ```
 
-输出程序为 `artifacts/linux-x64/ZProxy`。NativeAOT 产物不要求另装 .NET 运行时，但仍动态使用 **`libzstd.so.1`**；Debian / Ubuntu 运行机器需要 `libzstd1`。当前绑定使用 Linux 库名，CI 发布目标为 Linux x64。运行系统还需满足产物的系统库兼容要求，见 [.NET NativeAOT 部署说明](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/)。发布流程不把这些系统库打包进可执行文件。
+输出程序为 `artifacts/linux-x64/ZProxy`。这个小型产物不要求另装 .NET 运行时，但仍动态使用 **`libzstd.so.1`**，HTTPS 还需要系统 OpenSSL。当前目标是 Linux x64；主机须满足产物的系统库兼容要求，见 [.NET NativeAOT 部署说明](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/)。这些库不被静态塞入核心可执行文件。
+
+### 可选 OMP 与 AppImage
+
+重插件固定使用 OMP **18.20.3**（`67ef5342de6c24587fc59a6dbd3a2ab918510541`）、Bun **1.4.4** 和原 omp-shims **2.0.0**（`34189f420516f5ceeb8373998cc31896553c57ea`）。来源、下载校验值在 [upstream.lock.json](plugins/omp/upstream.lock.json)，npm 版本由冻结的 [bun.lock](plugins/omp/bun.lock) 锁定。构建不会跟随上游移动分支；升级须更新固定版本并重新检查两个窄补丁。
+
+在已有 NativeAOT 产物基础上，使用 Python 3.11 或更新版本：
+
+```sh
+sudo apt-get install --no-install-recommends -y desktop-file-utils
+python3 scripts/prepare-omp.py
+plugins/omp/bin/bun run --cwd plugins/omp test
+python3 scripts/smoke-omp.py --binary artifacts/linux-x64/ZProxy --omp-dir plugins/omp
+python3 scripts/build-appimage.py --binary artifacts/linux-x64/ZProxy
+python3 scripts/smoke-appimage.py --image artifacts/zproxy-omp-linux-x64.AppImage
+```
+
+AppImage 包含本体、Bun、OMP 运行所需源码和 production npm 包、native addon、Zstd/OpenSSL 及非 glibc 动态依赖。它不要求主机安装 Bun 或 .NET；主机仍提供 Linux 内核、glibc 和 CA 信任根。构建用 `readelf` 计算所需 GLIBC 符号下限，并把结果与二进制 hash、源版本、库版本写入随包的 `bundle.json`。Ubuntu 24.04 是构建基线，实际 ABI 下限以该次产物的 manifest 为准。产物不承诺在任意 Linux 发行版上运行。
+
+安装 FUSE 时可以直接执行 AppImage；也可以解包运行：
+
+```sh
+chmod +x zproxy-omp-linux-x64.AppImage
+./zproxy-omp-linux-x64.AppImage --appimage-extract
+./squashfs-root/AppRun --help
+```
+
+使用较大的 AppImage 仍须显式加 `--omp` 才启动重插件。镜像不包含用户账户、上游凭据或服务器配置。完整构建布局、许可证和验证方式见 [packaging/README.md](packaging/README.md)。
 
 ## 启动与生成用户
 
@@ -72,7 +106,7 @@ export ZPROXY_GATEWAY_TOKEN
   --data-dir ./data
 ```
 
-网关不需要 token 时，省略 `--gateway-token-env`。`--gateway` 必填，只能是固定 HTTP/HTTPS authority，如 `https://gateway.example:443`；不能带账户信息、业务路径、查询或片段。server 把允许的 `/v1/...` 路径拼到该地址，客户端不能指定其他目标。zproxy 不负责启动 OMP。
+网关不需要 token 时，省略 `--gateway-token-env`。此方式必须给出 `--gateway`，且只能是固定 HTTP/HTTPS authority，如 `https://gateway.example:443`；不能带账户信息、业务路径、查询或片段。server 把允许的 `/v1/...` 路径拼到该地址，客户端不能指定其他目标。已有网关由部署者启动。若需要 zproxy 自动启动 OMP 并交接原始下行，使用下方的重插件方式。
 
 示例隧道端口是 8080；server 默认隧道监听地址为 `0.0.0.0:80`。管理与报告使用独立监听器，默认是 `127.0.0.1:18081`。
 
@@ -108,6 +142,70 @@ curl --no-buffer 'http://127.0.0.1:18080/v1/chat/completions' \
 
 本地 HTTP 入口不要求 bearer token；UUID 用于 client 到 server 的隧道认证。某些 SDK 要求填写 API key 时可填本地占位值，应用发来的 Authorization 不会被用作上游凭据。将本地监听器绑定到 loopback，使本机应用通过这个已配置的用户身份发请求。
 
+## 启用 OMP 重插件
+
+主密码、UUID 和管理页面的使用方式不变。以下方式替代 server 的 `--gateway` 配置，并要求 client 同时开启 `--omp`。
+
+### 远端配置
+
+先用官方 OMP 在服务器完成账户登录，或准备服务器上的官方 `models.yml`。把 `authDatabase` 指向该 OMP 使用的 `agent.db`。例如，在远端保存 `remote.json`：
+
+```json
+{
+  "version": 1,
+  "authDatabase": "./omp-state/agent.db",
+  "modelsFile": "./omp-state/models.yml",
+  "discovery": "online-if-uncached",
+  "aliases": {
+    "main": "provider/model-id"
+  }
+}
+```
+
+把 `provider/model-id` 换成实际模型；不需要别名时可删掉 `aliases`。所有文件路径相对于 `remote.json` 所在目录解析。`models.yml` 直接交给当前官方 `ModelRegistry` 读取，保留官方格式、凭据解析和模型发现行为；无需再将它变成网关注入脚本。`modelsFile` 默认是账户库同目录的 `models.yml`，`modelCache` 默认是同目录的 `models.db`。模型发现可选 `offline`、`online` 或默认的 `online-if-uncached`，刷新间隔默认 5 分钟。
+
+账户库、`models.yml` 中的密钥、环境凭据以及 `remote.json` 都留在服务器。客户端不需要这些文件。官方账户选择、刷新、配额和重试仍由远端 OMP 处理；本地仅持有自己的隧道 UUID。
+
+已在两端准备 `plugins/omp` 时：
+
+```sh
+./artifacts/linux-x64/ZProxy server \
+  --listen 0.0.0.0:8080 \
+  --omp --omp-dir ./plugins/omp --omp-config ./remote.json \
+  --web-listen 127.0.0.1:18081 --data-dir ./data
+
+./artifacts/linux-x64/ZProxy client \
+  --listen 127.0.0.1:18080 --server http://relay.example:8080 \
+  --omp --omp-dir ./plugins/omp
+```
+
+AppImage 已自带目录和 Bun 路径，可以省略 `--omp-dir`：
+
+```sh
+./zproxy-omp-linux-x64.AppImage server \
+  --listen 0.0.0.0:8080 --omp --omp-config ./remote.json \
+  --web-listen 127.0.0.1:18081 --data-dir ./data
+
+./zproxy-omp-linux-x64.AppImage client \
+  --listen 127.0.0.1:18080 --server http://relay.example:8080 --omp
+```
+
+server 与 client 命令分别在远端和本机执行，且沿用前文各自的密码/UUID 环境变量。server 的 `--omp` 与 `--gateway`、`--gateway-token-env` 互斥。进程随本体启动，退出时一起清理；worker 意外退出会结束对应服务，使故障可见。
+
+### 复用原路由策略
+
+如需原 omp-shims 的共享路由，在 `remote.json` 加入 `"shimsConfig": "./shims.json"`，指向现有 v2 配置。该配置启用 `lazy-router` 后，远端使用固定版本原源码中的策略、健康、亲和、并发、速度和状态存储组件；实际凭据操作接回当前官方 OMP。多个用户共享远端的路由信息，用户隧道身份仍各自独立。
+
+`routesFile` 和日志路径按 `shims.json` 所在目录解析。`stateDbPath` 由原配置模块处理；建议使用明确的服务器私有绝对路径。`shimsConfig` 不是把所有旧猴子补丁无条件重新装上：已由官方功能接管的 shim 删除，必须保留的部分在对应边界实现。每项处理和限制见 [OMP_PARITY.md](docs/OMP_PARITY.md)。原路由事件日志属于远端私有诊断；公开 `/reports` 仍只显示昵称及聚合计数。
+
+### 下行范围和限制
+
+当前本地解析覆盖 OpenAI chat、Responses（含适配到该线格式的 Codex/Azure）、Anthropic、Google（含 Vertex）与 Gemini CLI 的受支持 SSE 路径。远端先检查有界的首段事件以保留前置错误和重试机会，再交接原字节；随后只保留有界的用量、健康、时序及必要的流续接处理。它不会在成功交接后重新组装整段 OMP 消息再序列化。
+
+没有对应本地 codec、没有可拦截 fetch/SSE 边界或使用特殊传输的上游，继续走官方远端转换；具体例外以逐项盘点为准。不能据此声称所有 provider 的下行 CPU 都已迁到本机。一般 chat 流按官方事件顺序直接输出；client 可加 `--omp-reasoning-order`，把晚到的 reasoning 排在可见文字和工具输出之前。该选项会缓冲可见输出，可能显著推迟文字首字到达，最多保留 16 MiB。
+
+OMP 的 `/v1/completions` 是 text prompt 到 chat 的兼容入口：只接受一个字符串 prompt（或单元素字符串数组）、一个结果 `n=1`，不支持 `echo=true`、`suffix`、`logprobs` 或 `best_of` 大于 1。原生 `/v1/chat/completions` 是主要接口。两个端点之外没有开放 OMP 的管理、模型枚举或其他 API。
+
 ## 管理、公开报告与数据文件
 
 `/` 和 `/reports` 是无需登录的统计页，`/api/reports` 是同样公开的 JSON API。它们只输出昵称与 `requests`、`succeeded`、`failed`、`canceled`、`active`、`requestBytes`、`responseBytes`、`durationMs`，不输出 UUID、内部用户 ID、selector 或派生密钥。新用户也有零计数行，停用用户的历史仍可查看。
@@ -117,12 +215,12 @@ curl --no-buffer 'http://127.0.0.1:18080/v1/chat/completions' \
 | 项目 | 含义 |
 | --- | --- |
 | 请求数 | 已结束请求加当前进行中请求 |
-| 成功 | server 完整读到网关响应正文 EOF，且 HTTP 状态为 2xx |
+| 成功 | server 完整读到远端响应正文 EOF，且 HTTP 状态为 2xx |
 | 失败 / 取消 | 非成功的结束结果；未读完且请求取消时记为取消 |
-| 上传 / 下行字节 | server 实际读出的请求 / 网关响应正文字节，在请求结束时汇总；不含 HTTP 头和隧道封装，也不是压缩后的链路流量 |
+| 上传 / 下行字节 | server 实际读出的请求 / 远端响应正文字节，在请求结束时汇总；OMP 原始下行模式计原始 provider 正文，不含解析说明、HTTP 头和隧道封装，也不是压缩后的链路流量 |
 | 总耗时 | 远端处理开始到请求结束的累计毫秒；页面平均值除以已结束请求数 |
 
-读到网关 EOF **不等于客户端已接收或解析完响应**。统计不包含本地解码耗时，也不解析 token 用量。它用于观察用量，不能作为精确计费记录。本地插件短路而没有到达 server 的请求不会出现在远端报告中。
+读到远端 EOF **不等于客户端已接收或解析完响应**。公开统计不包含本地解码耗时，也不展示 token 用量。OMP 路由可在自己的远端私有状态中记录有界用量数据，两者口径不同。公开报告用于观察用量，不能作为精确计费记录。本地插件短路而没有到达 server 的请求不会出现在远端报告中。
 
 管理 API 使用主密码登录后取得的 Cookie；用户 UUID 不能登录管理。接口见 [协议文档的管理部分](docs/PROTOCOL.md#10-管理与统计边界)。所有管理写操作，包括登录，要求与页面一致的 `Origin`；JSON 正文最多 4 KiB。会话有效期 30 分钟，最多 64 个，登录最多 8 次/分钟且限制并发。Cookie 为 HttpOnly、SameSite=Strict，HTTPS 下设置 Secure。响应不缓存，页面没有浏览器持久存储。
 
@@ -153,6 +251,8 @@ curl --no-buffer 'http://127.0.0.1:18080/v1/chat/completions' \
 
 窗口与队列限制不等于进程 RSS 上限。Zstd 上下文、HTTP/TLS 连接池、管道分段及程序本身另占内存；同时隧道数量会增加这些开销。
 
+启用 OMP 后还要计算独立 Bun 进程和模型解析器的内存。原请求在本机以私有临时文件保留供解码使用，上限 64 MiB；远端 JSON 请求默认上限 16 MiB，可在配置中调到至多 64 MiB。本地同时最多解码 4 个响应，单个原始响应上限 128 MiB；请求和非流式结果仍会在 JS 中形成对象。以上是输入和并发边界，不是承诺固定 RSS。
+
 | 参数 | 角色 | 默认值 | 含义 |
 | --- | --- | --- | --- |
 | `--listen IP:port` | 两者 | client `127.0.0.1:18080`；server `0.0.0.0:80` | 数据入口；IPv6 使用 `[::1]:18080` |
@@ -160,8 +260,13 @@ curl --no-buffer 'http://127.0.0.1:18080/v1/chat/completions' \
 | `--uuid-env NAME` | client | `ZPROXY_USER_UUID` | 用户 UUID 环境变量 |
 | `--connect-timeout-seconds` | client | `15` | 建立 TCP 与完成握手的期限 |
 | `--admin-password-env NAME` | server | `ZPROXY_ADMIN_PASSWORD` | 管理主密码环境变量 |
-| `--gateway URL` | server | 无，必填 | 固定的远端 OMP/兼容网关 authority |
+| `--gateway URL` | server | 未启用 OMP 时必填 | 固定的远端 OMP/兼容网关 authority |
 | `--gateway-token-env NAME` | server | 不设置 | 远端网关 bearer token 环境变量 |
+| `--omp` | 两者 | 关闭 | 启动可选 OMP worker；server 使用时要求 client 也开启 |
+| `--omp-dir PATH` | 两者 | `ZPROXY_OMP_DIR`，否则可执行文件旁的 `omp` | 含 worker、OMP 源码和依赖的目录；要求 `--omp` |
+| `--bun PATH` | 两者 | `ZPROXY_BUN`，否则插件目录的 `bin/bun` | 独立 Bun 可执行文件；要求 `--omp` |
+| `--omp-config PATH` | server | OMP 模式必填 | 远端私有配置；client 不读取 |
+| `--omp-reasoning-order` | client | 关闭 | 有界缓冲可见输出，使 reasoning 在前；要求 `--omp` |
 | `--data-dir PATH` | server | `data` | 私有用户与统计目录 |
 | `--web-listen IP:port` | server | `127.0.0.1:18081` | 管理和公开报告；端口须与隧道监听不同 |
 | `--max-tunnels` | server | `16` | `1..1024`；已接受连接和握手槽位，超出时关闭新连接 |
@@ -172,11 +277,11 @@ curl --no-buffer 'http://127.0.0.1:18080/v1/chat/completions' \
 
 ## HTTP 行为与失败处理
 
-应用请求只透传 `Content-Type`、`Content-Length`、`Accept`、`Accept-Encoding`。server 按固定网关重建 Host，并在配置了 `--gateway-token-env` 时加入自己的 `Authorization: Bearer ...`。应用的 Authorization、Cookie、自定义 API key 和代理转发头不进入网关请求。
+应用请求只透传 `Content-Type`、`Content-Length`、`Accept`、`Accept-Encoding`。默认 `--gateway` 模式按固定网关重建 Host，并在配置了 `--gateway-token-env` 时加入自己的 `Authorization: Bearer ...`。OMP 模式由远端官方 provider 构造请求和认证头。应用的 Authorization、Cookie、自定义 API key 和代理转发头不成为上游凭据。
 
 响应只透传 `Content-Type`、`Content-Length`、`Content-Encoding`、`Cache-Control`、`Retry-After`。Set-Cookie、Authorization、账户标识和其他不在白名单内的响应头不会送到 client。两个方向都先清除逐跳头及 `Connection` 点名的字段。这些头规则不会检查或删改正文内容。
 
-默认把 `Accept-Encoding` 设为 `identity`。本地请求附带 `X-Zproxy-Pass-Encoding: 1` 时，保留应用自己的编码协商；这个控制头不会发给网关。网关响应不自动解压，Content-Encoding 与原始正文对应。代理不跟随重定向、不维护 Cookie jar，响应头到达后开始转发并逐块刷新。由于响应头白名单不包含 Location，本地调用方不能依靠代理返回的重定向地址继续跳转。
+默认 `--gateway` 模式把 `Accept-Encoding` 设为 `identity`。本地请求附带 `X-Zproxy-Pass-Encoding: 1` 时，保留应用自己的编码协商；这个控制头不会发给网关。网关响应不自动解压，Content-Encoding 与原始正文对应。固定网关代理不跟随重定向、不维护 Cookie jar，响应头到达后开始转发并逐块刷新。由于响应头白名单不包含 Location，本地调用方不能依靠代理返回的重定向地址继续跳转。OMP 原始下行模式显式请求 `identity`，本地输出头由解析器重建；特殊上游握手和请求行为遵循对应官方 provider。
 
 本地可观测到的请求取消、连接中止或内部响应正文关闭会清理对应流并取消远端工作。TCP FIN 可以是合法半关闭，不能一律视作取消。隧道断开后已有请求失败，**不会自动重发 POST**；只有后续新请求触发重连。错误发生在本地响应头发出前时返回 502，响应已经开始时中止正文，不把错误文本插入 SSE。
 
@@ -189,17 +294,19 @@ curl --no-buffer 'http://127.0.0.1:18080/v1/chat/completions' \
 | `IProxyPlugin.Wrap` | 包装 HTTP handler，调用下一层或直接返回本地响应；第一个注册的插件位于最外层 |
 | `IResponseDecoder` | 按远端指定的 `Id` 与 `Version`，把原始下行正文和固定元数据转换为本地 OpenAI 响应 |
 
-使用 `Client.run options plugins ct` 组合请求插件，使用 `Client.runWithDecoders options plugins decoders ct` 同时注册下行解码器。命令行当前传入空列表。注册是构建时显式组合，NativeAOT 路径没有程序集扫描或运行时插件加载器。插件可管理独立本机进程，但未启用插件时本体不依赖 OMP/Bun。请求插件可在远端不可用时直接短路，不建立隧道。
+使用 `Client.run options plugins ct` 组合请求插件，使用 `Client.runWithDecoders options plugins decoders ct` 同时注册下行解码器。命令行的 `--omp` 显式组合请求上下文保存和 `omp-response` 解码器；未启用时传入空列表。NativeAOT 路径没有程序集扫描或运行时程序集加载器。插件可以管理独立本机进程，请求插件也可直接返回本地响应而不建立隧道。
 
-远端 `RemoteHandler` 接收服务器认证出的用户身份，返回原始响应和 [Contracts.fs](src/ZProxy/Contracts.fs) 的版本化元数据：解码器名、版本、模型别名、请求标识、尝试序号、流式标记。元数据没有任意扩展字典，不能装入账户快照、用户 UUID、selector、token、Cookie 或完整上游请求头。未知解码器或不兼容版本会使请求失败，不猜测响应格式。
+远端 `RemoteHandler` 接收服务器认证出的用户身份，返回原始响应和 [Contracts.fs](src/ZProxy/Contracts.fs) 的版本化元数据：解码器名、版本、模型别名、请求标识、尝试序号、流式标记及受限 `recipe`。OMP recipe 最多 8 KiB，字段固定为线格式、公开模型属性和所需解析兼容开关。它没有任意请求选项字典，不能装入账户快照、用户 UUID、selector、token、Cookie、上游地址或完整请求头；本体和 worker 分别校验。未知解码器或不兼容版本会使请求失败，不猜测响应格式。
 
-后续 OMP 插件应在**远端完成凭据选择和发请求之后、开始解析上游下行正文之前**交接原始响应，由本地解码器承担繁重解析转换。账户刷新、路由决策、共享健康状态和重试决策仍在远端；本地解码器不接收能还原上游账户的状态。本次仅提供这些边界，尚未实现交接补丁。
+OMP 插件在**远端完成凭据选择、请求构造和首段错误检查之后、官方完整下行解析器开始消费之前**交接成功响应。对官方源码和原路由源码的改动分别放在 [patch-upstream.mjs](plugins/omp/patch-upstream.mjs) 与 [patch-shims.mjs](plugins/omp/patch-shims.mjs)：每个补丁位置检查修改前、修改后的 SHA-256，源码漂移时终止准备。账户刷新、路由和健康状态不搬到本机；已经开始对外输出的请求不会因为隧道断线而重放。
 
-handler 的调用者持有输入请求，并在最终响应使用完后释放它。请求插件借用输入请求；丢弃下层响应时须释放它。解码器接管原始响应，可以关闭它，或把生命周期交给返回的正文流；失败和取消仍须清理，返回流仍依赖它时不能提前关闭。解码器收到原始本地请求对象，但上传正文可能已被消费；需要解析上下文的请求插件应在转发前自行保留，例如放入 `request.Options`，本体不会为解码器缓存或重放上传。插件自建请求、进程和任务由插件管理；服务不负责销毁传入的插件实例。
+handler 的调用者持有输入请求，并在最终响应使用完后释放它。请求插件借用输入请求；丢弃下层响应时须释放它。解码器接管原始响应，可以关闭它，或把生命周期交给返回的正文流；失败和取消仍须清理，返回流仍依赖它时不能提前关闭。解码器收到原始本地请求对象，但上传正文可能已被消费；需要解析上下文的插件须自行保存。OMP 的实现将原上传写入私有临时文件，随返回正文的生命周期删除；本体通用管道不会擅自缓存或重放上传。自建请求、进程和任务由插件管理。
 
 ## 验证与部署边界
 
-`dotnet test zproxy.slnx --configuration Release` 覆盖用户凭据、持久化、管理权限和报告隔离，以及 HTTP 分段、帧、加密、压缩历史、双工、额度、并发、取消、断线不重放、插件短路和解码器行为。[CI](.github/workflows/ci.yml) 运行测试、发布 Linux x64 NativeAOT，再用自有 loopback 网关运行 [smoke-native.py](scripts/smoke-native.py)，验证管理生成 UUID、远端凭据、公开统计、chunked 上传、SSE、并发和退出。
+`dotnet test zproxy.slnx --configuration Release` 覆盖用户凭据、持久化、管理权限和报告隔离，以及 HTTP 分段、帧、加密、压缩历史、双工、额度、并发、取消、断线不重放、插件短路、recipe 校验和解码器行为。`plugins/omp` 下的 Bun 测试直接使用固定版本官方模块、原路由组件和自有假上游，检查响应交接、格式转换、凭据边界及补丁漂移。
+
+[CI](.github/workflows/ci.yml) 的发布门槛包括：运行两组测试，发布 Linux x64 NativeAOT，运行 [smoke-native.py](scripts/smoke-native.py) 和 [smoke-omp.py](scripts/smoke-omp.py)，构建真实 AppImage，再通过 [smoke-appimage.py](scripts/smoke-appimage.py) 解包验证。解包测试使用包内 Bun/OMP，执行普通转发和 OMP 分拆流程；不依赖主机 Bun 或 .NET。所有上游流量均使用测试自建的 loopback fixture，不使用真实账户。只有这些步骤完成才上传对应产物；当前运行是否通过以 PR 的 CI 结果为准。
 
 目前没有发布吞吐、首字延迟或 RSS 测量结果。缩小窗口会改变可复用的历史，不能单凭参数推断速度和压缩比。一条 TCP 连接中的流可以交错发送，但丢包恢复仍可能让所有流共同等待。
 

@@ -15,14 +15,16 @@ gateway or a remote adapter. Never copy account state into the local decoder.
 The local-to-remote transport uses one HTTP/1.1 connection, one long chunked
 POST to `/tunnel`, and one long chunked 200 response. Both bodies flow at once.
 Do not add HTTP Upgrade, WebSocket, a second transport connection, or the old
-client-selected origin routes. The current wire version is v3; do not keep a
+client-selected origin routes. The current wire version is v4; do not keep a
 parallel legacy protocol or shared-password transport.
 
-The default gateway already returns OpenAI completions. Its identity decoder
-does not move OMP parsing work off the server. Heavy OMP integration, the
-remote handoff before response parsing, JS runtimes, and AppImage bundling
-remain outside this change. NativeAOT plugins are linked at build time. A
-plugin may own a local process; the core must work without it when disabled.
+The default gateway already returns OpenAI completions. The optional OMP
+plugin owns one bundled Bun child on each side. The remote official gateway
+keeps all credentials and routing; successful fetch responses move to the
+local official parser before remote semantic conversion. Special transports
+without a raw response seam use the official remote fallback. Do not claim
+that every provider is offloaded. NativeAOT bridges are linked at build time;
+the core must work without Bun or OMP when the plugin is disabled.
 
 ## Code responsibilities
 
@@ -44,6 +46,10 @@ plugin may own a local process; the core must work without it when disabled.
 - `Statistics` stores completed aggregates and projects public nickname rows.
 - `Management` owns bounded admin sessions and public reports.
 - `Server` composes global and per-user limits, stores, management, and dispatch.
+- `OmpMetadata` validates the narrow, credential-free decoder recipe.
+- `OmpWorker` owns Bun and private Unix socket duplex connections.
+- `Omp` composes the optional bridge, bounded request spool, and lifetimes.
+- `plugins/omp` owns the pinned OMP adapters and original remote route policy.
 - `Program` validates arguments and owns process shutdown.
 
 Keep dependencies flat and compose complete parts explicitly. Use short,
@@ -52,7 +58,9 @@ Do not add a framework for a single use case.
 
 ## Invariants
 
-- Never buffer an entire HTTP body. Data frames are at most 16 KiB.
+- The core never buffers an entire HTTP body. Data frames are at most 16 KiB.
+  The optional OMP parsers need bounded JSON request contexts; do not extend
+  this requirement to upstream response buffering in the remote process.
 - Bound headers, frames, encrypted records, decompressed output, queues,
   pending cancellations, replay entries, streams, and connections.
 - Wait for stream credit before placing data in the shared writer queue.
@@ -83,6 +91,12 @@ Do not add a framework for a single use case.
   normal HTTP/2 and HTTP/1.1 fallback.
 - Keep metadata fixed, bounded, and versioned. It may describe decoding but
   cannot contain account snapshots or credentials. Fail unknown decoders.
+- Keep the persistent UUID derivation domains at v3. The v4 transport has
+  separate session-key labels; upgrading must not invalidate existing users.
+- Keep local OMP fetch unable to make network calls. Remote retries and
+  continuations must complete under the official server account owner.
+- Source patches must check both pinned input and expected output hashes.
+  Do not silently accept upstream drift or install old global shim middleware.
 - The caller owns the final response. A decoder must close the raw response
   or transfer its lifetime to the returned stream, including failure cleanup.
   Upload bodies are single-pass; request plugins must save needed parse context
@@ -101,10 +115,16 @@ dotnet test zproxy.slnx --configuration Release
 dotnet publish src/ZProxy/ZProxy.fsproj --configuration Release \
   --runtime linux-x64 -p:PublishAot=true --output artifacts/linux-x64
 python3 scripts/smoke-native.py --binary artifacts/linux-x64/ZProxy
+python3 scripts/prepare-omp.py
+(cd plugins/omp && bin/bun test ./*.test.mjs --timeout 30000)
+python3 scripts/smoke-omp.py --binary artifacts/linux-x64/ZProxy --omp-dir plugins/omp
+python3 scripts/build-appimage.py --binary artifacts/linux-x64/ZProxy
+python3 scripts/smoke-appimage.py --image artifacts/zproxy-omp-linux-x64.AppImage
 ```
 
 Linux needs `libzstd.so.1`; NativeAOT builds also need the native toolchain.
-CI runs the full test suite and publishes a Linux NativeAOT artifact.
+CI runs the full test suite and publishes Linux NativeAOT and optional OMP
+AppImage artifacts. Do not skip the Unix duplex or extracted AppImage tests.
 
 Keep tests for actual behavior: overlapping HTTP request and response bodies,
 fragmented framing, authentication, bounded decompression, credit, cancellation,

@@ -78,7 +78,8 @@ module Frame =
             let length = textLength value
             require (length <= limit && (value |> Seq.forall (Char.IsControl >> not))) "Invalid response metadata text"
             length
-        12 + boundedText 64 metadata.Decoder + boundedText 128 metadata.ModelAlias + boundedText 64 metadata.RequestId
+        14 + boundedText 64 metadata.Decoder + boundedText 128 metadata.ModelAlias
+           + boundedText 64 metadata.RequestId + boundedText 8192 metadata.Recipe
 
     let private validate (frame: Frame) =
         let streamId, kind, flags, length =
@@ -147,13 +148,14 @@ module Frame =
             write16 status
             writeByte protocol
             writeHeaders headers
-            writeByte 1uy
+            writeByte 2uy
             writeText metadata.Decoder
             write16 metadata.Version
             writeText metadata.ModelAlias
             writeText metadata.RequestId
             write16 metadata.Attempt
             writeByte (if metadata.IsStreaming then 1uy else 0uy)
+            writeText metadata.Recipe
         | Data(_, payload, _) | Ping payload | Pong payload -> payload.CopyTo(bytes, offset)
         | EndStream _ -> ()
         | CancelStream(_, reason) -> writeText reason
@@ -185,16 +187,17 @@ module Frame =
                 let value = this.Text16()
                 yield name, value ]
         member this.Metadata() : Contracts.DecodeMetadata =
-            require (this.Byte() = 1uy) "Unsupported response metadata schema"
+            require (this.Byte() = 2uy) "Unsupported response metadata schema"
             let decoder = this.BoundedText16(64)
             let version = this.UInt16()
             let modelAlias = this.BoundedText16(128)
             let requestId = this.BoundedText16(64)
             let attempt = this.UInt16()
             let streaming = this.Byte()
+            let recipe = this.BoundedText16(8192)
             require (streaming <= 1uy) "Invalid response streaming flag"
             { Decoder = decoder; Version = version; ModelAlias = modelAlias
-              RequestId = requestId; Attempt = attempt; IsStreaming = streaming = 1uy }
+              RequestId = requestId; Attempt = attempt; IsStreaming = streaming = 1uy; Recipe = recipe }
         member _.Finish() = require (offset = bytes.Length) "Trailing frame data"
 
     let decode (bytes: byte[]) : Result<Frame, string> =

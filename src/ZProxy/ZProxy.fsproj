@@ -18,10 +18,12 @@
     <Compile Include="Plugins.fs" />
     <Compile Include="Options.fs" />
     <Compile Include="HttpUtils.fs" />
+    <Compile Include="OmpMetadata.fs" />
     <Compile Include="Flow.fs" />
     <Compile Include="Zstd.fs" />
     <Compile Include="Frame.fs" />
     <Compile Include="HttpWire.fs" />
+    <Compile Include="OmpWorker.fs" />
     <Compile Include="Handshake.fs" />
     <Compile Include="Tunnel.fs" />
     <Compile Include="Session.fs" />
@@ -30,6 +32,7 @@
     <Compile Include="Management.fs" />
     <Compile Include="Client.fs" />
     <Compile Include="Server.fs" />
+    <Compile Include="Omp.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

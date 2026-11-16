@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
+export ZPROXY_OMP_DIR=${ZPROXY_OMP_DIR:-"$APPDIR/usr/lib/zproxy/omp"}
+export ZPROXY_BUN=${ZPROXY_BUN:-"$APPDIR/usr/bin/bun"}
+export LD_LIBRARY_PATH="$APPDIR/usr/lib/zproxy/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$APPDIR/usr/bin/ZProxy" "$@"

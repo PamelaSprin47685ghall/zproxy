@@ -11,7 +11,8 @@ module Contracts =
           ModelAlias: string
           RequestId: string
           Attempt: int
-          IsStreaming: bool }
+          IsStreaming: bool
+          Recipe: string }
 
     let identity (requestId: string, isStreaming: bool) =
         { Decoder = "openai-completions"
@@ -19,7 +20,8 @@ module Contracts =
           ModelAlias = ""
           RequestId = requestId
           Attempt = 1
-          IsStreaming = isStreaming }
+          IsStreaming = isStreaming
+          Recipe = "" }
 
     type RemoteReply =
         { Response: HttpResponseMessage

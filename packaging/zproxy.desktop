@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=zproxy OMP
+Comment=Encrypted completion proxy with optional local OMP decoding
+Exec=ZProxy
+Icon=zproxy
+Terminal=true
+Categories=Network;

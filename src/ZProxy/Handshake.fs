@@ -10,7 +10,7 @@ open System.Threading.Tasks
 module Handshake =
     let private encode (limits: Options.Limits) =
         let bytes = Array.zeroCreate<byte> 12
-        "ZPX3"B.CopyTo(bytes, 0)
+        "ZPX4"B.CopyTo(bytes, 0)
         bytes[4] <- byte limits.UploadWindowLog
         bytes[5] <- byte limits.DownloadWindowLog
         BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(6, 2), uint16 limits.MaxStreams)
@@ -18,7 +18,7 @@ module Handshake =
         bytes
 
     let private decode (bytes: byte[]) =
-        if bytes.Length <> 12 || not (bytes.AsSpan(0, 4).SequenceEqual("ZPX3"B)) then
+        if bytes.Length <> 12 || not (bytes.AsSpan(0, 4).SequenceEqual("ZPX4"B)) then
             raise (InvalidDataException("Unsupported tunnel handshake."))
         Options.validate
             { UploadWindowLog = int bytes[4]

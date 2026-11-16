@@ -16,6 +16,7 @@
     <Compile Include="CommandTests.fs" />
     <Compile Include="HttpUtilsTests.fs" />
     <Compile Include="PluginTests.fs" />
+    <Compile Include="OmpMetadataTests.fs" />
     <Compile Include="MeteringTests.fs" />
     <Compile Include="FlowTests.fs" />
     <Compile Include="SessionTests.fs" />

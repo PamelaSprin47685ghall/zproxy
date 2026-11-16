@@ -65,6 +65,39 @@ module CommandTests =
         Assert.Equal(TimeSpan.FromSeconds(3.5), options.ConnectTimeout)
 
     [<Fact>]
+    let ``The optional client worker has no server configuration`` () =
+        let options = (client [| "--omp"; "--omp-dir"; "/bundle/omp"; "--bun"; "/bundle/bun" |]).Create userUuid None
+        let expected: Options.OmpOptions = { Directory = "/bundle/omp"; Bun = "/bundle/bun"; Config = None; ReasoningOrder = false }
+        Assert.Equal(Some expected, options.Omp)
+        Assert.True(((client [||]).Create userUuid None).Omp.IsNone)
+        let ordered = (client [| "--omp"; "--omp-reasoning-order" |]).Create userUuid None
+        Assert.True(ordered.Omp.Value.ReasoningOrder)
+
+    [<Fact>]
+    let ``The remote worker replaces the fixed gateway and keeps its own configuration`` () =
+        match parse [| "server"; "--omp"; "--omp-config"; "/private/remote.json" |] with
+        | Program.StartServer pending ->
+            let options = pending.Create "master" None
+            Assert.True(options.Gateway.IsNone)
+            Assert.True(pending.TokenEnvironment.IsNone)
+            Assert.Equal(Some "/private/remote.json", options.Omp.Value.Config)
+        | _ -> failwith "Expected a remote worker."
+
+    [<Theory>]
+    [<InlineData("server --omp")>]
+    [<InlineData("server --omp-config config.json")>]
+    [<InlineData("server --omp --omp-config config.json --gateway http://gateway.test")>]
+    [<InlineData("server --omp --omp-config config.json --gateway-token-env TOKEN")>]
+    [<InlineData("client --server http://example.test --omp --omp-config config.json")>]
+    [<InlineData("client --server http://example.test --omp-dir /bundle")>]
+    [<InlineData("client --server http://example.test --bun /bundle/bun")>]
+    [<InlineData("client --server http://example.test --omp --omp")>]
+    [<InlineData("client --server http://example.test --omp-reasoning-order")>]
+    [<InlineData("server --omp --omp-config remote.json --omp-reasoning-order")>]
+    let ``OMP flags reject ambiguous and server only options`` (command: string) =
+        Assert.NotEmpty(error (command.Split(' ', StringSplitOptions.RemoveEmptyEntries)))
+
+    [<Fact>]
     let ``Server defaults keep the master password and gateway separate from user UUIDs`` () =
         let pending = server [||]
         let requested = ResizeArray<string>()

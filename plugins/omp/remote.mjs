@@ -1,0 +1,297 @@
+#!/usr/bin/env bun
+// Keep credentials, model routing, and shared OMP account state on the server.
+import { createHash } from "node:crypto";
+import { chmod, mkdir, readFile, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import { createAuthGatewayRouter } from "@oh-my-pi/pi-ai/auth-gateway/server";
+import { coworkFetch } from "@oh-my-pi/pi-ai/providers/cowork-fetch";
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { indexModelsByRequestId, resolveGatewayModel } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-cli";
+import { descriptorFor, normalizeOpenAIRequest, serializeRecipe } from "./contract.mjs";
+import { createRawHandoff } from "./remote-handoff.mjs";
+import { continueGoogle } from "./remote-google.mjs";
+import { legacyResponse, legacyStream } from "./local-codec.mjs";
+import { createRemoteFeatures, getWireInfo } from "./remote-features.mjs";
+
+const PATHS = new Set(["/v1/chat/completions", "/v1/completions"]);
+const HEADER_NAMES = ["content-type", "cache-control", "retry-after", "x-zproxy-decode"];
+const CONFIG_KEYS = new Set(["version", "authDatabase", "modelsFile", "modelCache", "aliases", "providerOrder",
+  "disabledProviders", "discovery", "refreshMs", "headerTimeoutMs", "idleTimeoutMs", "maxRequestBytes",
+  "accountPolicies", "defaultReservePct", "shimsConfig"]);
+const utf8 = new TextEncoder();
+
+function plain(value, max, label) {
+  if (typeof value !== "string" || value.length === 0 || utf8.encode(value).length > max || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new Error(`Invalid ${label}.`);
+  }
+  return value;
+}
+
+export function validateConfig(value, base = process.cwd()) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1) throw new Error("Invalid OMP server configuration version.");
+  for (const key of Object.keys(value)) if (!CONFIG_KEYS.has(key)) throw new Error(`Unknown OMP configuration field: ${key}`);
+  const config = { ...value };
+  for (const key of ["authDatabase", "modelsFile", "modelCache", "shimsConfig"]) {
+    if (config[key] !== undefined) config[key] = resolve(base, plain(config[key], 4096, key));
+  }
+  if (!config.authDatabase) throw new Error("authDatabase is required on the server.");
+  config.modelsFile ??= resolve(dirname(config.authDatabase), "models.yml");
+  config.modelCache ??= resolve(dirname(config.authDatabase), "models.db");
+  config.aliases ??= {};
+  if (!config.aliases || typeof config.aliases !== "object" || Array.isArray(config.aliases) || Object.keys(config.aliases).length > 4096) throw new Error("Invalid model aliases.");
+  for (const [alias, model] of Object.entries(config.aliases)) { plain(alias, 128, "model alias"); plain(model, 512, "model target"); }
+  for (const key of ["providerOrder", "disabledProviders"]) {
+    config[key] ??= [];
+    if (!Array.isArray(config[key]) || config[key].length > 512) throw new Error(`Invalid ${key}.`);
+    for (const provider of config[key]) plain(provider, 128, key);
+  }
+  config.discovery ??= "online-if-uncached";
+  if (!["offline", "online", "online-if-uncached"].includes(config.discovery)) throw new Error("Invalid discovery mode.");
+  for (const [key, fallback, min, max] of [
+    ["refreshMs", 300000, 1000, 3600000], ["headerTimeoutMs", 120000, 100, 1800000],
+    ["idleTimeoutMs", 120000, 100, 1800000], ["maxRequestBytes", 16777216, 1024, 67108864],
+  ]) {
+    config[key] ??= fallback;
+    if (!Number.isInteger(config[key]) || config[key] < min || config[key] > max) throw new Error(`Invalid ${key}.`);
+  }
+  if (config.defaultReservePct !== undefined && (!Number.isFinite(config.defaultReservePct) || config.defaultReservePct < 0 || config.defaultReservePct > 100)) throw new Error("Invalid defaultReservePct.");
+  return config;
+}
+
+async function readBody(request, limit) {
+  if (!request.body) throw new Error("A JSON request body is required.");
+  const reader = request.body.getReader();
+  const parts = [];
+  let length = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      length += next.value.byteLength;
+      if (length > limit) throw new Error("The request body exceeds its limit.");
+      parts.push(next.value);
+    }
+  } catch (error) { await reader.cancel(error); throw error; }
+  finally { reader.releaseLock(); }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) { bytes.set(part, offset); offset += part.byteLength; }
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+}
+
+// Only the private F# bridge can supply this identity. No caller UUID or account token is accepted here.
+export function userScope(headers) {
+  const id = headers.get("x-zproxy-user-id");
+  if (!id || !/^[a-f0-9]{32,64}$/.test(id)) throw new Error("An authenticated user identity is required.");
+  const encoded = headers.get("x-zproxy-user-nickname") ?? "";
+  if (!/^[A-Za-z0-9_-]{1,512}$/.test(encoded)) throw new Error("Invalid authenticated user nickname.");
+  const nickname = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(encoded, "base64url"));
+  plain(nickname, 256, "authenticated user nickname");
+  return {
+    name: id, nickname, limitsModels: false,
+    allows: () => true,
+    credentialSessionId(provider, sessionId) {
+      return createHash("sha256").update(JSON.stringify(["zproxy-omp-session-v1", id, provider, sessionId])).digest("hex");
+    },
+    retain: () => () => {},
+  };
+}
+
+// A stream body prevents Bun from adding Content-Length on the private IPC connection.
+export function chunkedResponse(response) {
+  const headers = new Headers();
+  for (const name of HEADER_NAMES) if (response.headers.has(name)) headers.set(name, response.headers.get(name));
+  const reader = response.body?.getReader();
+  let closed = false;
+  return new Response(new ReadableStream({
+    async pull(controller) {
+      if (closed) return;
+      try {
+        const item = reader ? await reader.read() : { done: true };
+        if (item.done) { closed = true; reader?.releaseLock(); controller.close(); }
+        else controller.enqueue(item.value);
+      } catch (error) { closed = true; try { reader?.releaseLock(); } catch {} controller.error(error); }
+    },
+    async cancel(reason) {
+      if (closed) return;
+      closed = true;
+      try { await reader?.cancel(reason); } finally { reader?.releaseLock(); }
+    },
+  }), { status: response.status, headers });
+}
+
+export async function createRemoteGateway(input, { fetch: testFetch, routingFactory } = {}) {
+  const config = validateConfig(input);
+  await mkdir(dirname(config.authDatabase), { recursive: true, mode: 0o700 });
+  const storage = await AuthStorage.create(config.authDatabase, {
+    accountPolicies: config.accountPolicies, defaultReservePct: config.defaultReservePct,
+  });
+  await chmod(config.authDatabase, 0o600);
+  let timer;
+  let gateway;
+  let routing;
+  let features;
+  const active = new Set();
+  try {
+    await storage.credentials.reload();
+    const registry = new ModelRegistry(storage, config.modelsFile, { cacheDbPath: config.modelCache, fetch: testFetch });
+    if (registry.getError()) throw new Error("The server models file is invalid.");
+    features = await createRemoteFeatures({ config, storage, registry, fetch: testFetch });
+    let index;
+    const disabled = new Set(config.disabledProviders);
+    let refreshing;
+    const refresh = () => refreshing ??= (async () => {
+      await storage.credentials.poll();
+      await features.refresh();
+      await registry.refresh(config.discovery);
+      if (registry.getError()) throw new Error("The server models file is invalid.");
+      const models = registry.getAll("chat").filter(model => !disabled.has(model.provider));
+      index = indexModelsByRequestId(models, new Set(models.map(model => model.provider)), config.providerOrder);
+    })().finally(() => { refreshing = undefined; });
+    await refresh();
+    const resolveModel = (id, options) => resolveGatewayModel(Object.hasOwn(config.aliases, id) ? config.aliases[id] : id, index, options);
+    const chooseFetch = model => model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : fetch;
+    const handoff = createRawHandoff({
+      descriptorFor, serializeRecipe, chooseFetch,
+      isOAuth: (model, headers) => model.api === "anthropic-messages"
+        && isAnthropicOAuthToken((headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "")),
+      wrapRaw: continueGoogle, wireInfo: getWireInfo,
+      observeTurn: model => routing?.observeTurn?.(model) ?? {},
+      priceUsage: (model, usage) => { usage.cost = calculateCost(model, usage); },
+      headerTimeoutMs: config.headerTimeoutMs, idleTimeoutMs: config.idleTimeoutMs,
+    });
+    gateway = createAuthGatewayRouter({
+      storage, resolveModel, listModels: () => index.models, excludeProviders: disabled,
+      fetch: testFetch,
+      rawResponseHandoff(turn) {
+        const base = turn.options.fetch ?? chooseFetch(turn.model);
+        turn.options.fetch = (input, init) => features.fetch(input, init, base);
+        if (features.usesCustomTransport(turn.model)) return undefined;
+        return handoff(turn);
+      },
+    });
+    const dispatch = (request, peer, scope) => features.dispatch(request, peer, scope,
+      (request, peer, scope) => gateway.route(request, peer, scope));
+    if (routingFactory) routing = await routingFactory({ config, storage, registry, dispatch, resolveModel });
+    else if (config.shimsConfig) {
+      const { createRemoteRouting } = await import("./remote-routing.mjs");
+      routing = await createRemoteRouting({ config, storage, registry, dispatch, resolveModel });
+    }
+    timer = setInterval(() => { refresh().catch(() => process.stderr.write("OMP catalog refresh failed; the prior catalog remains active.\n")); }, config.refreshMs);
+    timer.unref();
+    return {
+      registry, storage,
+      async handle(request) {
+        const url = new URL(request.url);
+        if (request.method !== "POST" || url.search || !PATHS.has(url.pathname)) return Response.json({ error: "Unknown completion route." }, { status: 404 });
+        let scope;
+        let body;
+        try { scope = userScope(request.headers); }
+        catch { return Response.json({ error: "Authenticated IPC identity required." }, { status: 401 }); }
+        try { body = normalizeOpenAIRequest(url.pathname, await readBody(request, config.maxRequestBytes)); }
+        catch (error) { return Response.json({ error: { message: error.message } }, { status: 400 }); }
+        const controller = new AbortController();
+        active.add(controller);
+        const onAbort = () => controller.abort(request.signal.reason);
+        if (request.signal.aborted) onAbort();
+        else request.signal.addEventListener("abort", onAbort, { once: true });
+        const headers = new Headers({ "content-type": "application/json", "x-omp-install-id": scope.name, "x-omp-app": "zproxy" });
+        for (const name of ["x-prompt-cache-key", "x-session-id", "session_id", "conversation_id"]) {
+          if (request.headers.has(name)) headers.set(name, request.headers.get(name));
+        }
+        const normalized = new Request("http://zproxy-omp/v1/chat/completions", { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
+        let result;
+        try { result = await (routing?.dispatch ?? dispatch)(normalized, "private-unix", scope); }
+        catch { result = Response.json({ error: "OMP request failed." }, { status: 502 }); }
+        const release = () => { active.delete(controller); request.signal.removeEventListener("abort", onAbort); };
+        if (url.pathname === "/v1/completions" && result.ok && result.headers.get("x-zproxy-decode") !== "1") {
+          try {
+            const converted = /text\/event-stream/i.test(result.headers.get("content-type") ?? "")
+              ? legacyStream(result.body)
+              : JSON.stringify(legacyResponse(await readBody(result, 134217728)));
+            result = new Response(converted, { status: result.status, headers: result.headers });
+          } catch {
+            release();
+            return Response.json({ error: "The remote fallback could not encode this completion." }, { status: 502 });
+          }
+        }
+        if (!result.body) { release(); return result; }
+        const reader = result.body.getReader();
+        return new Response(new ReadableStream({
+          async pull(target) {
+            try {
+              const item = await reader.read();
+              if (item.done) { reader.releaseLock(); release(); target.close(); }
+              else target.enqueue(item.value);
+            } catch (error) { try { reader.releaseLock(); } catch {} release(); target.error(error); }
+          },
+          async cancel(reason) {
+            controller.abort(reason);
+            try { await reader.cancel(reason); } finally { reader.releaseLock(); release(); }
+          },
+        }), { status: result.status, headers: result.headers });
+      },
+      async close() {
+        clearInterval(timer);
+        for (const controller of active) controller.abort(new DOMException("The gateway stopped.", "AbortError"));
+        active.clear();
+        await routing?.close?.();
+        gateway.close();
+        await features.close();
+        storage.close();
+      },
+    };
+  } catch (error) {
+    clearInterval(timer);
+    await routing?.close?.();
+    gateway?.close();
+    await features?.close();
+    storage.close();
+    throw error;
+  }
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (args.length !== 4 || args[0] !== "--socket" || args[2] !== "--config" || !isAbsolute(args[1])) throw new Error("Usage: bun remote.mjs --socket ABSOLUTE_PATH --config CONFIG_PATH");
+  const socket = args[1];
+  const configPath = resolve(args[3]);
+  const text = await readFile(configPath, "utf8");
+  if (utf8.encode(text).length > 1048576) throw new Error("The OMP server configuration exceeds its limit.");
+  const config = validateConfig(JSON.parse(text), dirname(configPath));
+  const app = await createRemoteGateway(config);
+  let stopping = false;
+  let server;
+  const stop = async () => {
+    if (stopping) return;
+    stopping = true;
+    server.stop(true);
+    await app.close();
+    try { await unlink(socket); } catch {}
+    process.exit(0);
+  };
+  try {
+    server = Bun.serve({
+      unix: socket, idleTimeout: 0, maxRequestBodySize: config.maxRequestBytes,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/health" && request.method === "GET") return chunkedResponse(Response.json({ ready: !stopping }));
+        if (url.pathname === "/shutdown" && request.method === "POST") {
+          setTimeout(() => { void stop(); }, 25);
+          return chunkedResponse(Response.json({ stopping: true }));
+        }
+        return chunkedResponse(await app.handle(request));
+      },
+      error() { return chunkedResponse(Response.json({ error: "OMP request failed." }, { status: 502 })); },
+    });
+    await chmod(socket, 0o600);
+    process.on("SIGTERM", () => { void stop(); });
+    process.on("SIGINT", () => { void stop(); });
+    process.stdout.write("READY\n");
+  } catch (error) { await app.close(); throw error; }
+}
+
+if (import.meta.main) main().catch(() => { process.stderr.write("The OMP server could not start. Check its private configuration and pinned bundle.\n"); process.exit(1); });

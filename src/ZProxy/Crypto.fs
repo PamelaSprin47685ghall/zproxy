@@ -11,8 +11,8 @@ module Crypto =
     [<Literal>]
     let MaxChunkBytes = 65536
 
-    let InfoKeyC2S = "zproxy-v3-key-c2s"B
-    let InfoKeyS2C = "zproxy-v3-key-s2c"B
+    let InfoKeyC2S = "zproxy-v4-key-c2s"B
+    let InfoKeyS2C = "zproxy-v4-key-s2c"B
     let DirC2S = [| 0x43uy; 0x32uy; 0x53uy; 0uy |]
     let DirS2C = [| 0x53uy; 0x32uy; 0x43uy; 0uy |]
 

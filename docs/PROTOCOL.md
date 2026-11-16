@@ -1,12 +1,12 @@
-# zproxy v3 传输协议
+# zproxy v4 传输协议
 
 本文描述当前实现的用户认证、HTTP 外层、加密记录、请求帧和下行元数据。源码入口为 [Crypto.fs](../src/ZProxy/Crypto.fs)、[Users.fs](../src/ZProxy/Users.fs)、[HttpWire.fs](../src/ZProxy/HttpWire.fs)、[Handshake.fs](../src/ZProxy/Handshake.fs)、[Frame.fs](../src/ZProxy/Frame.fs)、[Contracts.fs](../src/ZProxy/Contracts.fs)、[Tunnel.fs](../src/ZProxy/Tunnel.fs) 和 [Session.fs](../src/ZProxy/Session.fs)。
 
 ## 1. 版本与连接范围
 
-**v3 与旧实现不兼容，必须同时升级两端。** 用户密钥派生、HKDF 标签、握手和响应元数据均使用本版本规则。远端隧道监听器只接受 `POST /tunnel HTTP/1.1`，没有旧协议回退或 Upgrade 协商。
+**v4 与旧传输不兼容，必须同时升级两端。** 本版更新 hello、会话 HKDF 标签和响应元数据，增加受限的 OMP 解码配方。UUID 的持久密钥派生保留 v3 的标签，因此已有 users.json、用户 UUID 和统计可以继续使用。远端隧道监听器只接受 `POST /tunnel HTTP/1.1`，没有旧协议回退或 Upgrade 协商。
 
-本地入口只接受 `POST /v1/chat/completions` 和 `POST /v1/completions`，方法和原始路径必须精确匹配，不接受查询参数。请求不携带目标服务地址。server 使用自己的 `--gateway` 配置选择固定 HTTP/HTTPS authority；上游凭据、账号状态、模型路由与共享健康决策由远端网关或远端适配器持有。
+本地入口只接受 `POST /v1/chat/completions` 和 `POST /v1/completions`，方法和原始路径必须精确匹配，不接受查询参数。请求不携带目标服务地址。server 使用自己的 `--gateway` 配置选择固定 HTTP/HTTPS authority，或通过 `--omp --omp-config` 启动远端 OMP 插件；上游凭据、账号状态、模型路由与共享健康决策由远端持有。
 
 一个 client 进程按需建立一条隧道。一个 TCP 连接只运行一次外层 HTTP 请求/响应交换；其请求体和响应体持续承载所有内层请求。连接断开时，压缩历史和所有活动请求一起结束。新请求可建立新连接，旧请求不重放。
 
@@ -84,7 +84,7 @@ HTTP chunk 解码后的请求体起始布局为：
 | 0 | 24 | 随机盐 |
 | 24 | 8 | Unix 毫秒时间戳，带符号 64 位大端整数 |
 
-HKDF-SHA256 以 `userKey` 为 IKM、完整 32 字节前导为 salt。两个方向分别使用 ASCII `zproxy-v3-key-c2s` 和 `zproxy-v3-key-s2c` 作为 Expand 的 info，派生各自的 32 字节会话密钥。服务端响应体直接从自己的 31 字节 hello 记录开始，不重复 selector 或前导。
+HKDF-SHA256 以 `userKey` 为 IKM、完整 32 字节前导为 salt。两个方向分别使用 ASCII `zproxy-v4-key-c2s` 和 `zproxy-v4-key-s2c` 作为 Expand 的 info，派生各自的 32 字节会话密钥。服务端响应体直接从自己的 31 字节 hello 记录开始，不重复 selector 或前导。
 
 server 先验证 client hello 的 AEAD，再登记重放状态。默认接受距当前时间正负 300000 ms 内的前导；已接受的盐保留 600000 ms。重放表最多 65536 项，表满时拒绝新会话。该表只在内存中，重启会清空。两端需要有足够接近的时钟。
 
@@ -96,7 +96,7 @@ server 先验证 client hello 的 AEAD，再登记重放状态。默认接受距
 
 | 偏移 | 长度 | 内容 |
 | --- | --- | --- |
-| 0 | 4 | ASCII `ZPX3` |
+| 0 | 4 | ASCII `ZPX4` |
 | 4 | 1 | 上行 Zstd window log |
 | 5 | 1 | 下行 Zstd window log |
 | 6 | 2 | 最大同时流数，uint16 大端 |
@@ -158,19 +158,22 @@ client 分配递增、非零的奇数 stream ID，同一会话不重用。ID 0 �
 
 | 顺序 | 编码 | 含义与限制 |
 | --- | --- | --- |
-| 1 | uint8 | 元数据 schema，固定为 `1` |
+| 1 | uint8 | 元数据 schema，固定为 `2` |
 | 2 | `text16` | `Decoder`，HTTP token，1..64 ASCII 字节 |
 | 3 | uint16 | 解码器 `Version`，`1..65535` |
 | 4 | `text16` | `ModelAlias`，最多 128 UTF-8 字节，可为空 |
 | 5 | `text16` | `RequestId`，最多 64 UTF-8 字节，可为空 |
 | 6 | uint16 | `Attempt`，`1..65535` |
 | 7 | uint8 | `IsStreaming`，只能为 `0` 或 `1` |
+| 8 | `text16` | `Recipe`，最多 8192 UTF-8 字节；identity 模式为空，OMP 模式为严格受限的 JSON 字符串 |
 
 文本必须是严格 UTF-8，元数据字符串不能含控制字符。schema 不认识、字段超限、枚举值非法或出现多余尾部字节都会拒绝该帧。schema 版本与解码器版本是两个不同字段。
 
 白名单描述的是如何解码本次响应，不能包含账户快照、UUID、selector、内部用户 ID、token、Cookie、Authorization 或完整上游请求头；字段值的来源也必须满足这条边界。没有可放入任意账户对象的扩展字典。
 
-默认固定网关返回 `Decoder="openai-completions"`、`Version=1`、空 ModelAlias、server 新建的请求标识、`Attempt=1`；`IsStreaming` 按网关 Content-Type 是否为 `text/event-stream` 设置。本体不会解析 model JSON，也不会用 Attempt 自动重试。内建解码器原样返回该响应；其他 `(Decoder, Version)` 必须有显式注册的本地解码器，否则释放原始响应并让该请求失败。
+默认固定网关返回 `Decoder="openai-completions"`、`Version=1`、空 ModelAlias 和 Recipe、server 新建的请求标识、`Attempt=1`；`IsStreaming` 按网关 Content-Type 是否为 `text/event-stream` 设置。本体不会解析 model JSON，也不会用 Attempt 自动重试。内建解码器原样返回该响应；其他 `(Decoder, Version)` 必须有显式注册的本地解码器，否则释放原始响应并让该请求失败。
+
+OMP 插件使用 `Decoder="omp-response"`、`Version=1`。配方只允许 api、provider、id、reasoning、input、contextWindow、maxTokens、compat 八个字段；compat 只允许解析器所需的八个已知选项。禁止附加 URL、headers、apiKey、账户、路由配置和任意扩展字段；重复键也被拒绝。准确字段和枚举由 [OmpMetadata.fs](../src/ZProxy/OmpMetadata.fs) 与 [contract.mjs](../plugins/omp/contract.mjs) 共同约束。它是解析配方，不是能够重新发起上游请求的配置。
 
 ## 7. 正文流控与队列
 
@@ -219,13 +222,23 @@ client 的请求槽位限制同时在途请求数。等待槽位也受请求取�
 
 本地默认用 `Accept-Encoding: identity` 请求网关。`X-Zproxy-Pass-Encoding: 1` 可保留调用者的原始编码协商，此控制头随后移除。上游连接不自动解压，不跟随重定向，也不维护 Cookie jar。Content-Encoding 与未解码正文保持一致。响应使用 `ResponseHeadersRead`，正文逐块回到本地并刷新。
 
-`IProxyPlugin.Wrap` 在 client 的 HTTP handler 链上组合；第一个注册的插件位于最外层。插件可自己返回响应，在没有远端连接时完成短路。`IResponseDecoder` 根据第 6 节的版本化元数据处理原始下行。分别通过 `Client.run options plugins ct` 和 `Client.runWithDecoders options plugins decoders ct` 显式组合，命令行入口当前使用空列表。NativeAOT 不提供运行时程序集扫描或插件发现协议。
+`IProxyPlugin.Wrap` 在 client 的 HTTP handler 链上组合；第一个注册的插件位于最外层。插件可自己返回响应，在没有远端连接时完成短路。`IResponseDecoder` 根据第 6 节的版本化元数据处理原始下行。分别通过 `Client.run options plugins ct` 和 `Client.runWithDecoders options plugins decoders ct` 显式组合。命令行 `--omp` 注册已编译的桥接器并管理随包 Bun 子进程；未启用时不启动或加载 OMP。NativeAOT 不提供运行时程序集扫描或插件发现协议。
 
-`RemoteHandler` 接收服务器认证得到的 `Users.Identity`，返回原始 `HttpResponseMessage` 和元数据。身份不来自请求正文或客户端 HTTP 头。未来 OMP 接入应在远端完成账户和路由选择、收到上游响应之后，且在解析响应正文之前交接字节；本地仅处理繁重的下行解码转换。账号刷新、路由、重试决策和所有用户共享的健康状态保持在远端，不复制到账户快照或本地解码器中。
+`RemoteHandler` 接收服务器认证得到的 `Users.Identity`，返回原始 `HttpResponseMessage` 和元数据。身份不来自请求正文或客户端 HTTP 头。OMP 插件在官方网关完成账户和路由选择之后，截获成功的上游 HTTP/SSE Response，使远端的 provider 解析器不开始消费成功正文。本地复用相同版本的官方解析器与 OpenAI 编码器。远端继续做有限的首段错误检查、usage 采样，以及 Google continuation 所需的后续认证请求。
 
-当前固定网关适配器要求响应已经是 OpenAI completions 格式，内建 identity 解码不会减去远端 OMP 已完成的解析工作。OMP 重插件、实际交接补丁、JS 运行时和包含 OMP 的 AppImage 不在本次实现内。
+没有可截获 fetch/Response 的特殊传输继续运行官方远端语义流程，再使用 identity 解码器返回；这类路径保留可用性，但没有获得下行计算转移。固定网关适配器同样要求响应已经是 OpenAI completions。具体支持矩阵和旧 shim 处置见 [OMP_PARITY.md](OMP_PARITY.md)。
 
 handler 的调用者持有输入请求，并负责在最终响应使用完后释放它。请求插件借用输入请求，丢弃下层响应时须释放它。解码器接管原始响应：可以原样返回，或把原始响应的生命周期交给返回的正文流，也可以在不再使用它时关闭；失败和取消仍须清理。不能在返回流仍依赖原始响应时提前释放。解码器得到原始本地请求对象，但正文可能已经读完；请求插件需要的解析上下文应在转发前保留，例如放入 `request.Options`，本体不会缓存或重放上传供解码器读取。插件自建的请求、进程、任务和实例由其创建者管理，client 不自动销毁插件实例。
+
+### OMP 私有进程接口
+
+每个 F# 角色拥有一个 Bun 子进程和一个 0700 临时目录，IPC 使用其中的 Unix socket。子进程先输出 `READY`，F# 随后启动服务；子进程异常退出会取消服务。关停先发送 `/shutdown`，超时后结束进程树并清理临时文件。IPC 也是 HTTP/1.1 chunked，上传与下载由独立任务同时进行，不经过可能等待上传完成的 HttpClient。
+
+远端私有请求中，F# 生成内部用户 ID 和 base64url 编码的昵称。成功原始响应使用私有 `X-Zproxy-Decode: 1` 标记，正文为 `uint32(metadataBytes)`、最多 16 KiB 元数据 JSON、原始上游字节。F# 在计量正文前取走前缀；前缀不会计入上游 responseBytes。其余响应为 identity 模式。
+
+本地 `/decode` 请求为 `uint32(envelopeBytes)`、最多 64 KiB envelope JSON、原应用请求正文、原始上游正文。envelope 明确给出 requestBytes、原入口路径、元数据、状态和安全响应头。原应用请求在上传时写入受限的 0600 临时文件，最大 64 MiB；F# 不再保留完整内存副本。文件随最终响应释放而删除。Bun 本地解析器需要构建受限的原请求上下文，并流式读取后续原始响应；不用等待原始响应 EOF 才返回 SSE。
+
+本地子进程继承的环境经过白名单筛选，独立的 OMP 目录位于临时目录中。解码 fetch 是只能消费传入 Response 一次的函数；禁止发起真正网络请求、刷新账户或重试。远端配置和凭据文件没有传入本地进程。
 
 ## 10. 管理与统计边界
 

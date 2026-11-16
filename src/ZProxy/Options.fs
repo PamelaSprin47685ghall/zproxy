@@ -34,12 +34,19 @@ module Options =
           StreamWindowBytes = min offered.StreamWindowBytes allowed.StreamWindowBytes }
         |> validate
 
+    type OmpOptions =
+        { Directory: string
+          Bun: string
+          ReasoningOrder: bool
+          Config: string option }
+
     type ClientOptions =
         { Listen: IPEndPoint
           Server: Uri
           UserUuid: string
           Limits: Limits
-          ConnectTimeout: TimeSpan }
+          ConnectTimeout: TimeSpan
+          Omp: OmpOptions option }
 
     type ServerOptions =
         { Listen: IPEndPoint
@@ -51,14 +58,16 @@ module Options =
           Limits: Limits
           MaxTunnels: int
           MaxUserTunnels: int
-          HandshakeTimeout: TimeSpan }
+          HandshakeTimeout: TimeSpan
+          Omp: OmpOptions option }
 
     let client listen server userUuid =
         { Listen = listen
           Server = server
           UserUuid = userUuid
           Limits = defaults
-          ConnectTimeout = TimeSpan.FromSeconds(15.0) }
+          ConnectTimeout = TimeSpan.FromSeconds(15.0)
+          Omp = None }
 
     let server listen adminPassword =
         { Listen = listen
@@ -70,4 +79,5 @@ module Options =
           Limits = defaults
           MaxTunnels = 16
           MaxUserTunnels = 2
-          HandshakeTimeout = TimeSpan.FromSeconds(15.0) }
+          HandshakeTimeout = TimeSpan.FromSeconds(15.0)
+          Omp = None }

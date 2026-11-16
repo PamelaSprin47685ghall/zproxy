@@ -20,7 +20,7 @@ env:
 jobs:
   test-and-publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
         with:
@@ -33,7 +33,14 @@ jobs:
       - name: Install native build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y clang libzstd-dev zlib1g-dev
+          sudo apt-get install --no-install-recommends -y clang libzstd-dev zlib1g-dev libssl-dev desktop-file-utils
+
+      - name: Prepare pinned OMP runtime
+        run: python3 scripts/prepare-omp.py
+
+      - name: Run OMP plugin tests
+        working-directory: plugins/omp
+        run: bin/bun test ./*.test.mjs --timeout 30000
 
       - name: Restore packages
         run: dotnet restore zproxy.slnx
@@ -61,6 +68,15 @@ jobs:
       - name: Run NativeAOT smoke test
         run: python3 scripts/smoke-native.py --binary artifacts/linux-x64/ZProxy
 
+      - name: Run split OMP NativeAOT smoke test
+        run: python3 scripts/smoke-omp.py --binary artifacts/linux-x64/ZProxy --omp-dir plugins/omp
+
+      - name: Build self-contained OMP AppImage
+        run: python3 scripts/build-appimage.py --binary artifacts/linux-x64/ZProxy
+
+      - name: Run extracted AppImage smoke test
+        run: python3 scripts/smoke-appimage.py --image artifacts/zproxy-omp-linux-x64.AppImage
+
       - name: Pack NativeAOT binary
         run: tar -czf artifacts/zproxy-linux-x64.tar.gz -C artifacts/linux-x64 .
 
@@ -69,6 +85,18 @@ jobs:
         with:
           name: zproxy-linux-x64
           path: artifacts/zproxy-linux-x64.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Save OMP AppImage
+        uses: actions/upload-artifact@v7
+        with:
+          name: zproxy-omp-linux-x64
+          path: |
+            artifacts/zproxy-omp-linux-x64.AppImage
+            artifacts/zproxy-omp-linux-x64.AppImage.sha256
+            artifacts/zproxy-omp-linux-x64.bundle.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
