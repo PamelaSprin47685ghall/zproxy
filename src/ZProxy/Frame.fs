@@ -7,6 +7,13 @@ open System.Text
 
 module Frame =
 
+    [<Literal>]
+    let MaxDataBytes = 16384
+    [<Literal>]
+    let MaxPayloadBytes = 32768
+    [<Literal>]
+    let MaxHeaderCount = 128
+
     type FrameType =
         | OpenRequest = 0x01uy
         | ResponseHeaders = 0x02uy
@@ -15,6 +22,7 @@ module Frame =
         | CancelStream = 0x05uy
         | Ping = 0x06uy
         | Pong = 0x07uy
+        | WindowUpdate = 0x08uy
 
     [<Flags>]
     type FrameFlags =
@@ -31,158 +39,168 @@ module Frame =
         | CancelStream of streamId: uint32 * reason: string
         | Ping of payload: byte[]
         | Pong of payload: byte[]
+        | WindowUpdate of streamId: uint32 * credit: int
 
-    let private writeStringWithLen16 (bw: BinaryWriter) (s: string) =
-        let bytes = Encoding.UTF8.GetBytes(s)
-        let lenBuf = Array.zeroCreate<byte> 2
-        BinaryPrimitives.WriteUInt16BigEndian(Span<byte>(lenBuf), uint16 bytes.Length)
-        bw.Write(lenBuf)
-        bw.Write(bytes)
+    let private utf8 = UTF8Encoding(false, true)
 
-    let private readStringWithLen16 (br: BinaryReader) : string =
-        let lenBytes = br.ReadBytes(2)
-        let len = int (BinaryPrimitives.ReadUInt16BigEndian(ReadOnlySpan<byte>(lenBytes)))
-        let strBytes = br.ReadBytes(len)
-        Encoding.UTF8.GetString(strBytes)
+    let private require condition message =
+        if not condition then raise (InvalidDataException(message))
 
-    let private writeHeaders (bw: BinaryWriter) (headers: HeaderPair list) =
-        let countBuf = Array.zeroCreate<byte> 2
-        BinaryPrimitives.WriteUInt16BigEndian(Span<byte>(countBuf), uint16 headers.Length)
-        bw.Write(countBuf)
-        for (k, v) in headers do
-            writeStringWithLen16 bw k
-            writeStringWithLen16 bw v
+    let private token (text: string) =
+        not (String.IsNullOrEmpty(text))
+        && (text |> Seq.forall (fun c ->
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+            || "!#$%&'*+-.^_`|~".IndexOf(c) >= 0))
 
-    let private readHeaders (br: BinaryReader) : HeaderPair list =
-        let countBytes = br.ReadBytes(2)
-        let count = int (BinaryPrimitives.ReadUInt16BigEndian(ReadOnlySpan<byte>(countBytes)))
-        let mutable acc = []
-        for _ in 1 .. count do
-            let k = readStringWithLen16 br
-            let v = readStringWithLen16 br
-            acc <- (k, v) :: acc
-        List.rev acc
+    let private textLength (text: string) =
+        require (not (isNull text)) "Text must not be null"
+        let length = utf8.GetByteCount(text)
+        require (length <= MaxPayloadBytes) "Text exceeds the frame limit"
+        length
 
-    /// Encode logical Frame into [8-byte header][Payload] per AGENTS.md 5.2
-    let encode (frame: Frame) : byte[] =
-        use ms = new MemoryStream()
-        use bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen = true)
-        ms.Position <- 8L
+    let private headerLength (headers: HeaderPair list) =
+        require (not (isNull (box headers)) && headers.Length <= MaxHeaderCount) "Too many headers"
+        let mutable length = 2
+        for name, value in headers do
+            require (token name) "Invalid header name"
+            require (not (isNull value) && (value |> Seq.forall (fun c -> c = '\t' || (c >= ' ' && c <> '\u007f'))))
+                "Invalid header value"
+            length <- length + 4 + textLength name + textLength value
+            require (length <= MaxPayloadBytes) "Headers exceed the frame limit"
+        length
 
-        let mutable streamId = 0u
-        let mutable fType = FrameType.OpenRequest
-        let mutable flags = FrameFlags.None
-
+    let private validate (frame: Frame) =
+        let streamId, kind, flags, length =
+            match frame with
+            | OpenRequest(id, method, target, headers, ended) ->
+                require (token method && method.Length <= 255) "Invalid HTTP method"
+                require (not (String.IsNullOrEmpty(target)) && (target |> Seq.forall (fun c -> c > ' ' && c <> '\u007f')))
+                    "Invalid target URL"
+                id, FrameType.OpenRequest, ended, 1 + textLength method + 2 + textLength target + headerLength headers
+            | ResponseHeaders(id, status, protocol, headers, ended) ->
+                require (status >= 100 && status <= 599) "Invalid response status"
+                require (protocol = 1uy || protocol = 2uy || protocol = 3uy) "Invalid HTTP version"
+                id, FrameType.ResponseHeaders, ended, 3 + headerLength headers
+            | Data(id, payload, ended) ->
+                require (not (isNull payload) && payload.Length >= 1 && payload.Length <= MaxDataBytes)
+                    "Data length must be between 1 and 16384 bytes"
+                id, FrameType.Data, ended, payload.Length
+            | EndStream id -> id, FrameType.EndStream, false, 0
+            | CancelStream(id, reason) ->
+                let length = textLength reason
+                require (length <= 1024) "Cancel reason exceeds 1024 bytes"
+                id, FrameType.CancelStream, false, 2 + length
+            | Ping payload | Pong payload ->
+                require (not (isNull payload) && payload.Length = 8) "Heartbeat must contain eight bytes"
+                let kind = match frame with Ping _ -> FrameType.Ping | _ -> FrameType.Pong
+                0u, kind, false, 8
+            | WindowUpdate(id, credit) ->
+                require (credit > 0) "Window credit must be positive"
+                id, FrameType.WindowUpdate, false, 4
         match frame with
-        | Frame.OpenRequest (sid, m, url, hdrs, es) ->
-            streamId <- sid
-            fType <- FrameType.OpenRequest
-            if es then flags <- flags ||| FrameFlags.EndStream
-            bw.Write(byte m.Length)
-            let mBytes = Encoding.UTF8.GetBytes(m)
-            bw.Write(mBytes)
-            writeStringWithLen16 bw url
-            writeHeaders bw hdrs
+        | Ping _ | Pong _ -> ()
+        | _ -> require (streamId > 0u && (streamId &&& 1u) = 1u) "Stream ID must be a nonzero odd number"
+        require (length <= MaxPayloadBytes) "Payload exceeds 32768 bytes"
+        streamId, kind, flags, length
 
-        | Frame.ResponseHeaders (sid, status, protoVer, hdrs, es) ->
-            streamId <- sid
-            fType <- FrameType.ResponseHeaders
-            if es then flags <- flags ||| FrameFlags.EndStream
-            let statusBuf = Array.zeroCreate<byte> 2
-            BinaryPrimitives.WriteUInt16BigEndian(Span<byte>(statusBuf), uint16 status)
-            bw.Write(statusBuf)
-            bw.Write(protoVer)
-            writeHeaders bw hdrs
+    let encode (frame: Frame) : byte[] =
+        let id, kind, ended, length = validate frame
+        let bytes = Array.zeroCreate<byte> (8 + length)
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(0, 4), id)
+        bytes[4] <- LanguagePrimitives.EnumToValue kind
+        bytes[5] <- if ended then 1uy else 0uy
+        BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(6, 2), uint16 length)
+        let mutable offset = 8
+        let writeByte value =
+            bytes[offset] <- value
+            offset <- offset + 1
+        let write16 value =
+            BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(offset, 2), uint16 value)
+            offset <- offset + 2
+        let writeText (text: string) =
+            let length = utf8.GetByteCount(text)
+            write16 length
+            offset <- offset + utf8.GetBytes(text, 0, text.Length, bytes, offset)
+        let writeHeaders headers =
+            write16 (List.length headers)
+            for name, value in headers do
+                writeText name
+                writeText value
+        match frame with
+        | OpenRequest(_, method, target, headers, _) ->
+            writeByte (byte method.Length)
+            offset <- offset + utf8.GetBytes(method, 0, method.Length, bytes, offset)
+            writeText target
+            writeHeaders headers
+        | ResponseHeaders(_, status, protocol, headers, _) ->
+            write16 status
+            writeByte protocol
+            writeHeaders headers
+        | Data(_, payload, _) | Ping payload | Pong payload -> payload.CopyTo(bytes, offset)
+        | EndStream _ -> ()
+        | CancelStream(_, reason) -> writeText reason
+        | WindowUpdate(_, credit) -> BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(offset, 4), uint32 credit)
+        bytes
 
-        | Frame.Data (sid, payload, es) ->
-            streamId <- sid
-            fType <- FrameType.Data
-            if es then flags <- flags ||| FrameFlags.EndStream
-            bw.Write(payload)
+    type private Reader(bytes: byte[]) =
+        let mutable offset = 8
+        member private _.Take(count: int) =
+            require (count >= 0 && count <= bytes.Length - offset) "Truncated frame field"
+            let start = offset
+            offset <- offset + count
+            start
+        member this.Byte() = bytes[this.Take(1)]
+        member this.UInt16() = int (BinaryPrimitives.ReadUInt16BigEndian(bytes.AsSpan(this.Take(2), 2)))
+        member this.UInt32() = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(this.Take(4), 4))
+        member this.Text(count: int) = utf8.GetString(bytes, this.Take(count), count)
+        member this.Text16() = this.Text(this.UInt16())
+        member this.Bytes(count: int) = bytes.AsSpan(this.Take(count), count).ToArray()
+        member this.Headers() =
+            let count = this.UInt16()
+            require (count <= MaxHeaderCount) "Too many headers"
+            [ for _ in 1 .. count do
+                let name = this.Text16()
+                let value = this.Text16()
+                yield name, value ]
+        member _.Finish() = require (offset = bytes.Length) "Trailing frame data"
 
-        | Frame.EndStream sid ->
-            streamId <- sid
-            fType <- FrameType.EndStream
-
-        | Frame.CancelStream (sid, reason) ->
-            streamId <- sid
-            fType <- FrameType.CancelStream
-            writeStringWithLen16 bw reason
-
-        | Frame.Ping p ->
-            streamId <- 0u
-            fType <- FrameType.Ping
-            bw.Write(p)
-
-        | Frame.Pong p ->
-            streamId <- 0u
-            fType <- FrameType.Pong
-            bw.Write(p)
-
-        bw.Flush()
-        let payloadLen = int (ms.Length - 8L)
-        if payloadLen > 65535 then failwith "Frame payload exceeds 65535 bytes"
-
-        let buf = ms.ToArray()
-        BinaryPrimitives.WriteUInt32BigEndian(Span<byte>(buf, 0, 4), streamId)
-        buf.[4] <- LanguagePrimitives.EnumToValue fType
-        buf.[5] <- LanguagePrimitives.EnumToValue flags
-        BinaryPrimitives.WriteUInt16BigEndian(Span<byte>(buf, 6, 2), uint16 payloadLen)
-        buf
-
-    /// Decode logical Frame from raw bytes per AGENTS.md 5.2
     let decode (bytes: byte[]) : Result<Frame, string> =
-        if bytes.Length < 8 then
-            Error "Header too short"
-        else
-            let streamId = BinaryPrimitives.ReadUInt32BigEndian(ReadOnlySpan<byte>(bytes, 0, 4))
-            let fType : FrameType = LanguagePrimitives.EnumOfValue bytes.[4]
-            let flags : FrameFlags = LanguagePrimitives.EnumOfValue bytes.[5]
-            let hasEndStream = (flags &&& FrameFlags.EndStream) <> FrameFlags.None
-            let payloadLen = int (BinaryPrimitives.ReadUInt16BigEndian(ReadOnlySpan<byte>(bytes, 6, 2)))
-            if bytes.Length < 8 + payloadLen then
-                Error "Payload truncated"
-            else
-                use ms = new MemoryStream(bytes, 8, payloadLen, writable = false)
-                use br = new BinaryReader(ms, Encoding.UTF8, leaveOpen = true)
-                match fType with
-                | FrameType.OpenRequest ->
-                    if payloadLen < 1 then Error "Empty OpenRequest payload"
-                    else
-                        let mLen = int (br.ReadByte())
-                        let mBytes = br.ReadBytes(mLen)
-                        let method = Encoding.UTF8.GetString(mBytes)
-                        let url = readStringWithLen16 br
-                        let headers = readHeaders br
-                        Ok (Frame.OpenRequest (streamId, method, url, headers, hasEndStream))
-
-                | FrameType.ResponseHeaders ->
-                    if payloadLen < 3 then Error "Empty ResponseHeaders payload (needs status + protoVer)"
-                    else
-                        let statusBytes = br.ReadBytes(2)
-                        let status = int (BinaryPrimitives.ReadUInt16BigEndian(ReadOnlySpan<byte>(statusBytes)))
-                        let protoVer = br.ReadByte()
-                        let headers = readHeaders br
-                        Ok (Frame.ResponseHeaders (streamId, status, protoVer, headers, hasEndStream))
-
-                | FrameType.Data ->
-                    let data = br.ReadBytes(payloadLen)
-                    Ok (Frame.Data (streamId, data, hasEndStream))
-
-                | FrameType.EndStream ->
-                    Ok (Frame.EndStream streamId)
-
-                | FrameType.CancelStream ->
-                    let reason = readStringWithLen16 br
-                    Ok (Frame.CancelStream (streamId, reason))
-
-                | FrameType.Ping ->
-                    let p = br.ReadBytes(payloadLen)
-                    Ok (Frame.Ping p)
-
-                | FrameType.Pong ->
-                    let p = br.ReadBytes(payloadLen)
-                    Ok (Frame.Pong p)
-
-                | _ ->
-                    Error (sprintf "Unknown frame type: %d" (int fType))
+        try
+            require (not (isNull bytes) && bytes.Length >= 8) "Truncated frame header"
+            let id = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(0, 4))
+            let kind = bytes[4]
+            let flags = bytes[5]
+            let length = int (BinaryPrimitives.ReadUInt16BigEndian(bytes.AsSpan(6, 2)))
+            require (length <= MaxPayloadBytes && bytes.Length = 8 + length) "Invalid frame length"
+            require ((flags &&& 0xfeuy) = 0uy) "Unknown frame flags"
+            require (flags = 0uy || kind = 1uy || kind = 2uy || kind = 3uy) "Unexpected end flag"
+            let ended = flags = 1uy
+            let reader = Reader(bytes)
+            let frame =
+                match kind with
+                | 1uy ->
+                    let method = reader.Text(int (reader.Byte()))
+                    let target = reader.Text16()
+                    OpenRequest(id, method, target, reader.Headers(), ended)
+                | 2uy ->
+                    let status = reader.UInt16()
+                    let protocol = reader.Byte()
+                    ResponseHeaders(id, status, protocol, reader.Headers(), ended)
+                | 3uy -> Data(id, reader.Bytes(length), ended)
+                | 4uy -> EndStream id
+                | 5uy -> CancelStream(id, reader.Text16())
+                | 6uy | 7uy ->
+                    require (id = 0u) "Heartbeat stream ID must be zero"
+                    let payload = reader.Bytes(length)
+                    if kind = 6uy then Ping payload else Pong payload
+                | 8uy ->
+                    let credit = reader.UInt32()
+                    require (credit <= uint32 Int32.MaxValue) "Window credit exceeds the limit"
+                    WindowUpdate(id, int credit)
+                | _ -> raise (InvalidDataException("Unknown frame type"))
+            reader.Finish()
+            validate frame |> ignore
+            Ok frame
+        with
+        | :? InvalidDataException as error -> Error error.Message
+        | :? ArgumentException -> Error "Invalid UTF-8 field"

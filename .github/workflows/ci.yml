@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "true"
+
+jobs:
+  test-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang libzstd-dev zlib1g-dev
+
+      - name: Restore packages
+        run: dotnet restore zproxy.slnx
+
+      - name: Run all tests
+        run: >-
+          dotnet test zproxy.slnx --configuration Release --no-restore
+          --logger "trx;LogFileName=tests.trx"
+          --results-directory artifacts/test-results
+
+      - name: Save test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: artifacts/test-results
+          retention-days: 14
+
+      - name: Publish NativeAOT binary
+        run: >-
+          dotnet publish src/ZProxy/ZProxy.fsproj --configuration Release
+          --runtime linux-x64 --self-contained true -p:PublishAot=true
+          --output artifacts/linux-x64
+
+      - name: Run NativeAOT smoke test
+        run: python3 scripts/smoke-native.py --binary artifacts/linux-x64/ZProxy
+
+      - name: Pack NativeAOT binary
+        run: tar -czf artifacts/zproxy-linux-x64.tar.gz -C artifacts/linux-x64 .
+
+      - name: Save NativeAOT binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: zproxy-linux-x64
+          path: artifacts/zproxy-linux-x64.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
