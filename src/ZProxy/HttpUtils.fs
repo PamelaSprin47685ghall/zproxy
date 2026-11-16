@@ -3,7 +3,6 @@ namespace ZProxy
 open System
 open System.Collections.Generic
 open System.Net.Http
-open System.Text
 
 module HttpUtils =
     let private fixedHopHeaders =
@@ -20,30 +19,23 @@ module HttpUtils =
                     excluded.Add(token.Trim()) |> ignore
         headers |> List.filter (fun (name, _) -> not (excluded.Contains(name)))
 
-    let validTarget (uri: Uri) =
+    let validGateway (uri: Uri) =
         uri.IsAbsoluteUri
         && (uri.Scheme = "http" || uri.Scheme = "https")
         && uri.UserInfo = "" && uri.Fragment = "" && uri.Host <> ""
+        && uri.Query = "" && uri.AbsolutePath = "/" && uri.Port > 0
 
-    /// Read the raw request target. Do not decode the origin path twice.
-    let parseTargetUrl (rawTarget: string) : Result<Uri, string> =
-        try
-            let text = rawTarget.TrimStart('/')
-            let target =
-                if text.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
-                   || text.StartsWith("https://", StringComparison.OrdinalIgnoreCase) then text
-                else
-                    let boundary = text.IndexOfAny([| '/'; '?' |])
-                    let encoded, suffix =
-                        if boundary < 0 then text, ""
-                        else text.Substring(0, boundary), text.Substring(boundary)
-                    let prefix = Encoding.UTF8.GetString(Convert.FromHexString(encoded))
-                    if prefix.EndsWith('/') && suffix.StartsWith('/') then prefix + suffix.Substring(1)
-                    else prefix + suffix
-            match Uri.TryCreate(target, UriKind.Absolute) with
-            | true, uri when validTarget uri -> Ok uri
-            | _ -> Error "The request path must contain an HTTP or HTTPS origin URL."
-        with :? FormatException -> Error "The encoded origin URL is not valid hexadecimal."
+    let private requestFields =
+        HashSet<string>([ "content-type"; "content-length"; "accept"; "accept-encoding" ], StringComparer.OrdinalIgnoreCase)
+
+    let private responseFields =
+        HashSet<string>([ "content-type"; "content-length"; "content-encoding"; "cache-control"; "retry-after" ], StringComparer.OrdinalIgnoreCase)
+
+    let safeRequestHeaders headers =
+        filterHeaders headers |> List.filter (fun (name, _) -> requestFields.Contains(name))
+
+    let safeResponseHeaders headers =
+        filterHeaders headers |> List.filter (fun (name, _) -> responseFields.Contains(name))
 
     let requestHeaders (request: HttpRequestMessage) =
         [ for header in request.Headers do
@@ -51,23 +43,23 @@ module HttpUtils =
           if request.Content <> null then
               for header in request.Content.Headers do
                   for value in header.Value do yield header.Key, value ]
-        |> filterHeaders
+        |> safeRequestHeaders
 
     let responseHeaders (response: HttpResponseMessage) =
         [ for header in response.Headers do
               for value in header.Value do yield header.Key, value
           for header in response.Content.Headers do
               for value in header.Value do yield header.Key, value ]
-        |> filterHeaders
+        |> safeResponseHeaders
 
     let addRequestHeaders (request: HttpRequestMessage) headers =
-        for name, value in filterHeaders headers do
+        for name, value in safeRequestHeaders headers do
             if not (request.Headers.TryAddWithoutValidation(name, value)) then
                 if request.Content <> null then
                     request.Content.Headers.TryAddWithoutValidation(name, value) |> ignore
 
     let addResponseHeaders (response: HttpResponseMessage) headers =
-        for name, value in filterHeaders headers do
+        for name, value in safeResponseHeaders headers do
             if not (response.Headers.TryAddWithoutValidation(name, value)) then
                 response.Content.Headers.TryAddWithoutValidation(name, value) |> ignore
 

@@ -1,52 +1,80 @@
 namespace ZProxy.Tests
 
 open System
+open System.Net
 open System.Net.Http
-open System.Text
 open Xunit
 open ZProxy
 
 module HttpUtilsTests =
     [<Theory>]
-    [<InlineData("/https://example.test/v1/a%2Fb?x=a%2Fb&y=%252f", "https://example.test/v1/a%2Fb?x=a%2Fb&y=%252f")>]
-    [<InlineData("/http://[::1]:8080/v1?q=1", "http://[::1]:8080/v1?q=1")>]
-    let ``Direct target preserves escaped path and query`` path expected =
-        match HttpUtils.parseTargetUrl path with
-        | Ok uri -> Assert.Equal(expected, uri.OriginalString)
-        | Error error -> failwith error
-
-    [<Fact>]
-    let ``Hex target preserves origin prefix and suffix`` () =
-        let encoded = Convert.ToHexString(Encoding.UTF8.GetBytes("https://example.test/base/"))
-        match HttpUtils.parseTargetUrl ("/" + encoded + "/chat?x=%2F") with
-        | Ok uri -> Assert.Equal("https://example.test/base/chat?x=%2F", uri.OriginalString)
-        | Error error -> failwith error
+    [<InlineData("http://127.0.0.1:3000", true)>]
+    [<InlineData("https://gateway.example/", true)>]
+    [<InlineData("http://[::1]:3000/", true)>]
+    [<InlineData("https://gateway.example/v1", false)>]
+    [<InlineData("https://user:password@gateway.example/", false)>]
+    [<InlineData("https://gateway.example/?route=other", false)>]
+    [<InlineData("https://gateway.example/#fragment", false)>]
+    [<InlineData("ftp://gateway.example/", false)>]
+    let ``Gateway configuration accepts only a fixed authority`` address expected =
+        Assert.Equal(expected, HttpUtils.validGateway (Uri(address)))
 
     [<Theory>]
-    [<InlineData("/ftp://example.test/file")>]
-    [<InlineData("/https://user:password@example.test/a")>]
-    [<InlineData("/https://example.test/a#fragment")>]
-    [<InlineData("/xyz")>]
-    let ``Unsupported targets are rejected`` path =
-        Assert.True(HttpUtils.parseTargetUrl path |> Result.isError)
+    [<InlineData("/v1/chat/completions")>]
+    [<InlineData("/v1/completions")>]
+    let ``Completion contracts contain only a logical path`` path =
+        use request = new HttpRequestMessage(HttpMethod.Post, Contracts.logicalUri path)
+        Assert.Equal("zproxy.internal", request.RequestUri.Host)
+        Assert.Equal(path, Contracts.requestPath request)
+
+    [<Theory>]
+    [<InlineData("GET", "http://zproxy.internal/v1/chat/completions")>]
+    [<InlineData("POST", "http://zproxy.internal/v1/models")>]
+    [<InlineData("POST", "http://zproxy.internal/v1/chat/completions?target=other")>]
+    [<InlineData("POST", "http://zproxy.internal/v1/chat/completions#fragment")>]
+    [<InlineData("POST", "http://zproxy.internal/https://other.example/v1/chat/completions")>]
+    [<InlineData("POST", "/v1/chat/completions")>]
+    let ``Other operations cannot enter the remote request contract`` method address =
+        use request = new HttpRequestMessage(HttpMethod(method), Uri(address, UriKind.RelativeOrAbsolute))
+        Assert.Throws<ArgumentException>(fun () -> Contracts.requestPath request |> ignore) |> ignore
 
     [<Fact>]
-    let ``Connection tokens are removed with hop fields`` () =
+    let ``Connection tokens remove even allowed fields`` () =
         let source =
-            [ "Connection", "keep-alive, X-Private"; "X-Private", "local"
+            [ "Connection", "keep-alive, Accept-Encoding"; "Accept-Encoding", "gzip"
               "Transfer-Encoding", "chunked"; "Host", "localhost"
-              "Content-Encoding", "gzip"; "Authorization", "Bearer example" ]
+              "Content-Type", "application/json"; "Authorization", "Bearer private" ]
         Assert.Equal<(string * string) list>(
-            [ "Content-Encoding", "gzip"; "Authorization", "Bearer example" ],
-            HttpUtils.filterHeaders source)
+            [ "Content-Type", "application/json" ], HttpUtils.safeRequestHeaders source)
 
     [<Fact>]
-    let ``Content headers and repeated response fields survive forwarding`` () =
-        use response = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+    let ``Request forwarding removes credentials and identity claims`` () =
+        use request = new HttpRequestMessage(HttpMethod.Post, Contracts.logicalUri "/v1/completions")
+        request.Content <- new ByteArrayContent([| 1uy; 2uy |])
+        HttpUtils.addRequestHeaders request
+            [ "Content-Type", "application/json"; "Accept", "text/event-stream"
+              "Accept-Encoding", "identity"; "Authorization", "Bearer private"
+              "Cookie", "session=private"; "X-User-Id", "another-user"
+              "X-Api-Key", "private"; "Forwarded", "for=other" ]
+        let headers = HttpUtils.requestHeaders request
+        Assert.Contains(("Content-Type", "application/json"), headers)
+        Assert.Contains(("Accept", "text/event-stream"), headers)
+        Assert.Contains(("Accept-Encoding", "identity"), headers)
+        for name in [ "Authorization"; "Cookie"; "X-User-Id"; "X-Api-Key"; "Forwarded" ] do
+            Assert.DoesNotContain(headers, fun (key, _) -> key.Equals(name, StringComparison.OrdinalIgnoreCase))
+
+    [<Fact>]
+    let ``Response forwarding keeps body metadata and removes account state`` () =
+        use response = new HttpResponseMessage(HttpStatusCode.OK)
         response.Content <- new ByteArrayContent([| 1uy; 2uy |])
         HttpUtils.addResponseHeaders response
             [ "Content-Type", "application/octet-stream"; "Content-Encoding", "gzip"
-              "Set-Cookie", "a=1"; "Set-Cookie", "b=2" ]
+              "Cache-Control", "no-store"; "Retry-After", "10"
+              "Set-Cookie", "session=private"; "Authorization", "Bearer private"
+              "X-Provider-Account", "private"; "X-Decoder", "untrusted" ]
         let headers = HttpUtils.responseHeaders response
         Assert.Contains(("Content-Encoding", "gzip"), headers)
-        Assert.Equal(2, headers |> List.filter (fun (key, _) -> key = "Set-Cookie") |> List.length)
+        Assert.Contains(("Cache-Control", "no-store"), headers)
+        Assert.Contains(("Retry-After", "10"), headers)
+        for name in [ "Set-Cookie"; "Authorization"; "X-Provider-Account"; "X-Decoder" ] do
+            Assert.DoesNotContain(headers, fun (key, _) -> key.Equals(name, StringComparison.OrdinalIgnoreCase))

@@ -17,11 +17,13 @@ module ProtocolTests =
         | Ok value -> value
         | Error message -> failwith message
 
+    let private metadata = Contracts.identity("request-1", true)
+
     [<Fact>]
     let ``Frames round trip with exact lengths and byte credit`` () =
         let frames =
-            [ Frame.OpenRequest(1u, "POST", "https://example.test/v1/chat/completions", [ "Content-Type", "application/json" ], false)
-              Frame.ResponseHeaders(1u, 200, 2uy, [ "Content-Type", "text/event-stream" ], false)
+            [ Frame.OpenRequest(1u, "POST", "/v1/chat/completions", [ "Content-Type", "application/json" ], false)
+              Frame.ResponseHeaders(1u, 200, 2uy, [ "Content-Type", "text/event-stream" ], metadata, false)
               Frame.Data(1u, "token"B, true)
               Frame.EndStream 3u
               Frame.CancelStream(3u, "caller closed")
@@ -36,7 +38,7 @@ module ProtocolTests =
 
     [<Fact>]
     let ``Frame reader rejects malformed fields without index errors`` () =
-        let encoded = Frame.encode (Frame.OpenRequest(1u, "POST", "https://example.test/", [], false))
+        let encoded = Frame.encode (Frame.OpenRequest(1u, "POST", "/v1/chat/completions", [], false))
         for count in 0 .. encoded.Length - 1 do
             Assert.True((Frame.decode encoded[0 .. count - 1]).IsError)
         let badFlags = Array.copy encoded
@@ -57,7 +59,76 @@ module ProtocolTests =
         Assert.Throws<InvalidDataException>(fun () -> Frame.encode (Frame.Data(1u, Array.empty, false)) |> ignore) |> ignore
         Assert.Throws<InvalidDataException>(fun () -> Frame.encode (Frame.Data(1u, Array.zeroCreate 16385, false)) |> ignore) |> ignore
         Assert.Throws<InvalidDataException>(fun () -> Frame.encode (Frame.Ping [| 0uy |]) |> ignore) |> ignore
-        Assert.Throws<InvalidDataException>(fun () -> Frame.encode (Frame.ResponseHeaders(1u, 200, 11uy, [], true)) |> ignore) |> ignore
+        Assert.Throws<InvalidDataException>(fun () -> Frame.encode (Frame.ResponseHeaders(1u, 200, 11uy, [], metadata, true)) |> ignore) |> ignore
+
+    [<Fact>]
+    let ``Response metadata has fixed fields and bounded UTF-8 lengths`` () =
+        let boundary =
+            { metadata with Decoder = String('d', 64); Version = 65535; ModelAlias = String('m', 128)
+                            RequestId = String('r', 64); Attempt = 65535 }
+        let frame value = Frame.ResponseHeaders(1u, 200, 2uy, [], value, false)
+        Assert.Equal(frame boundary, Frame.decode (Frame.encode (frame boundary)) |> unwrap)
+        let rejected =
+            [ { metadata with Decoder = "" }
+              { metadata with Decoder = "invalid/decoder" }
+              { metadata with Decoder = String('d', 65) }
+              { metadata with Version = 0 }
+              { metadata with Version = 65536 }
+              { metadata with ModelAlias = String('m', 129) }
+              { metadata with ModelAlias = String('\u754c', 43) }
+              { metadata with ModelAlias = "name\r\nextra" }
+              { metadata with RequestId = String('r', 65) }
+              { metadata with RequestId = null }
+              { metadata with Attempt = 0 }
+              { metadata with Attempt = 65536 } ]
+        for value in rejected do
+            Assert.Throws<InvalidDataException>(fun () -> Frame.encode (frame value) |> ignore) |> ignore
+        let encoded = Frame.encode (frame metadata)
+        for offset, value in [ 13, 2uy; 16, 0xffuy; encoded.Length - 1, 2uy ] do
+            let bad = Array.copy encoded
+            bad[offset] <- value
+            Assert.True((Frame.decode bad).IsError)
+        let badDecoderLength = Array.copy encoded
+        badDecoderLength[15] <- 65uy
+        Assert.True((Frame.decode badDecoderLength).IsError)
+        let badVersion = Array.copy encoded
+        Array.Clear(badVersion, 16 + Encoding.UTF8.GetByteCount(metadata.Decoder), 2)
+        Assert.True((Frame.decode badVersion).IsError)
+        let badAttempt = Array.copy encoded
+        Array.Clear(badAttempt, badAttempt.Length - 3, 2)
+        Assert.True((Frame.decode badAttempt).IsError)
+
+    [<Fact>]
+    let ``Response headers and metadata share the frame payload limit`` () =
+        let frame value = Frame.ResponseHeaders(1u, 200, 2uy, [ "x-large", value ], metadata, false)
+        let overhead = (Frame.encode (frame "")).Length - 8
+        let largest = frame (String('a', Frame.MaxPayloadBytes - overhead))
+        let encoded = Frame.encode largest
+        Assert.Equal(Frame.MaxPayloadBytes + 8, encoded.Length)
+        Assert.Equal(largest, Frame.decode encoded |> unwrap)
+        Assert.Throws<InvalidDataException>(fun () ->
+            Frame.encode (frame (String('a', Frame.MaxPayloadBytes - overhead + 1))) |> ignore) |> ignore
+
+    [<Fact>]
+    let ``User UUID credentials have separate selectors and keys`` () =
+        let uuid = "6f63a515-50d0-4c3c-9c17-3a10ed9ec1f7"
+        let first = Crypto.deriveUserCredential uuid
+        let upper = Crypto.deriveUserCredential (uuid.ToUpperInvariant())
+        let second = Crypto.deriveUserCredential "ebd98813-833b-4ea0-94e0-d57a26bb40af"
+        Assert.Equal(32, first.Selector.Length)
+        Assert.Equal(32, first.Key.Length)
+        Assert.Equal<byte>(SHA256.HashData(Encoding.ASCII.GetBytes("zproxy-v3-user-selector\000" + uuid)), first.Selector)
+        Assert.Equal<byte>(SHA256.HashData(Encoding.ASCII.GetBytes("zproxy-v3-user-key\000" + uuid)), first.Key)
+        Assert.Equal<byte>(first.Selector, upper.Selector)
+        Assert.Equal<byte>(first.Key, upper.Key)
+        Assert.NotEqual<byte>(first.Selector, first.Key)
+        Assert.NotEqual<byte>(first.Selector, second.Selector)
+        Assert.NotEqual<byte>(first.Key, second.Key)
+        for invalid in
+            [ null; ""; uuid.Replace("-", ""); "{" + uuid + "}"; uuid + " "
+              "6f63a515-50d0-1c3c-9c17-3a10ed9ec1f7"; "6f63a515-50d0-4c3c-1c17-3a10ed9ec1f7" ] do
+            let error = Assert.Throws<ArgumentException>(fun () -> Crypto.deriveUserCredential invalid |> ignore)
+            if not (String.IsNullOrEmpty(invalid)) then Assert.DoesNotContain(invalid, error.Message)
 
     [<Fact>]
     let ``Preamble replay table is bounded and handles extreme timestamps`` () =
@@ -189,8 +260,10 @@ module ProtocolTests =
         use server = new Tunnel.EncryptedZstdTunnel(right, keys, preamble, false, 23, 23, timeout.Token)
         CryptographicOperations.ZeroMemory(keys.KeyC2S.AsSpan())
         CryptographicOperations.ZeroMemory(keys.KeyS2C.AsSpan())
-        let largeHeader = Frame.ResponseHeaders(1u, 200, 2uy, [ "x-large", String('a', 32750) ], false)
-        let frames = [ Frame.OpenRequest(1u, "POST", "https://example.test/", [], false)
+        let header value = Frame.ResponseHeaders(1u, 200, 2uy, [ "x-large", value ], metadata, false)
+        let overhead = (Frame.encode (header "")).Length - 8
+        let largeHeader = header (String('a', Frame.MaxPayloadBytes - overhead))
+        let frames = [ Frame.OpenRequest(1u, "POST", "/v1/chat/completions", [], false)
                        Frame.Data(1u, Array.create 16384 66uy, false)
                        Frame.Data(1u, Array.create 16384 67uy, false)
                        Frame.EndStream 1u ]

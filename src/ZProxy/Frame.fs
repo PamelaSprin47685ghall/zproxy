@@ -33,7 +33,7 @@ module Frame =
 
     type Frame =
         | OpenRequest of streamId: uint32 * method: string * targetUrl: string * headers: HeaderPair list * hasEndStream: bool
-        | ResponseHeaders of streamId: uint32 * statusCode: int * protoVersion: byte * headers: HeaderPair list * hasEndStream: bool
+        | ResponseHeaders of streamId: uint32 * statusCode: int * protoVersion: byte * headers: HeaderPair list * metadata: Contracts.DecodeMetadata * hasEndStream: bool
         | Data of streamId: uint32 * payload: byte[] * hasEndStream: bool
         | EndStream of streamId: uint32
         | CancelStream of streamId: uint32 * reason: string
@@ -69,6 +69,17 @@ module Frame =
             require (length <= MaxPayloadBytes) "Headers exceed the frame limit"
         length
 
+    let private metadataLength (metadata: Contracts.DecodeMetadata) =
+        require (not (isNull (box metadata))) "Missing response metadata"
+        require (token metadata.Decoder && metadata.Decoder.Length <= 64) "Invalid response decoder"
+        require (metadata.Version >= 1 && metadata.Version <= 65535) "Invalid decoder version"
+        require (metadata.Attempt >= 1 && metadata.Attempt <= 65535) "Invalid response attempt"
+        let boundedText limit (value: string) =
+            let length = textLength value
+            require (length <= limit && (value |> Seq.forall (Char.IsControl >> not))) "Invalid response metadata text"
+            length
+        12 + boundedText 64 metadata.Decoder + boundedText 128 metadata.ModelAlias + boundedText 64 metadata.RequestId
+
     let private validate (frame: Frame) =
         let streamId, kind, flags, length =
             match frame with
@@ -77,10 +88,10 @@ module Frame =
                 require (not (String.IsNullOrEmpty(target)) && (target |> Seq.forall (fun c -> c > ' ' && c <> '\u007f')))
                     "Invalid target URL"
                 id, FrameType.OpenRequest, ended, 1 + textLength method + 2 + textLength target + headerLength headers
-            | ResponseHeaders(id, status, protocol, headers, ended) ->
+            | ResponseHeaders(id, status, protocol, headers, metadata, ended) ->
                 require (status >= 100 && status <= 599) "Invalid response status"
                 require (protocol = 1uy || protocol = 2uy || protocol = 3uy) "Invalid HTTP version"
-                id, FrameType.ResponseHeaders, ended, 3 + headerLength headers
+                id, FrameType.ResponseHeaders, ended, 3 + headerLength headers + metadataLength metadata
             | Data(id, payload, ended) ->
                 require (not (isNull payload) && payload.Length >= 1 && payload.Length <= MaxDataBytes)
                     "Data length must be between 1 and 16384 bytes"
@@ -132,10 +143,17 @@ module Frame =
             offset <- offset + utf8.GetBytes(method, 0, method.Length, bytes, offset)
             writeText target
             writeHeaders headers
-        | ResponseHeaders(_, status, protocol, headers, _) ->
+        | ResponseHeaders(_, status, protocol, headers, metadata, _) ->
             write16 status
             writeByte protocol
             writeHeaders headers
+            writeByte 1uy
+            writeText metadata.Decoder
+            write16 metadata.Version
+            writeText metadata.ModelAlias
+            writeText metadata.RequestId
+            write16 metadata.Attempt
+            writeByte (if metadata.IsStreaming then 1uy else 0uy)
         | Data(_, payload, _) | Ping payload | Pong payload -> payload.CopyTo(bytes, offset)
         | EndStream _ -> ()
         | CancelStream(_, reason) -> writeText reason
@@ -154,6 +172,10 @@ module Frame =
         member this.UInt32() = BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(this.Take(4), 4))
         member this.Text(count: int) = utf8.GetString(bytes, this.Take(count), count)
         member this.Text16() = this.Text(this.UInt16())
+        member this.BoundedText16(limit: int) =
+            let count = this.UInt16()
+            require (count <= limit) "Response metadata exceeds its field limit"
+            this.Text(count)
         member this.Bytes(count: int) = bytes.AsSpan(this.Take(count), count).ToArray()
         member this.Headers() =
             let count = this.UInt16()
@@ -162,6 +184,17 @@ module Frame =
                 let name = this.Text16()
                 let value = this.Text16()
                 yield name, value ]
+        member this.Metadata() : Contracts.DecodeMetadata =
+            require (this.Byte() = 1uy) "Unsupported response metadata schema"
+            let decoder = this.BoundedText16(64)
+            let version = this.UInt16()
+            let modelAlias = this.BoundedText16(128)
+            let requestId = this.BoundedText16(64)
+            let attempt = this.UInt16()
+            let streaming = this.Byte()
+            require (streaming <= 1uy) "Invalid response streaming flag"
+            { Decoder = decoder; Version = version; ModelAlias = modelAlias
+              RequestId = requestId; Attempt = attempt; IsStreaming = streaming = 1uy }
         member _.Finish() = require (offset = bytes.Length) "Trailing frame data"
 
     let decode (bytes: byte[]) : Result<Frame, string> =
@@ -185,7 +218,8 @@ module Frame =
                 | 2uy ->
                     let status = reader.UInt16()
                     let protocol = reader.Byte()
-                    ResponseHeaders(id, status, protocol, reader.Headers(), ended)
+                    let headers = reader.Headers()
+                    ResponseHeaders(id, status, protocol, headers, reader.Metadata(), ended)
                 | 3uy -> Data(id, reader.Bytes(length), ended)
                 | 4uy -> EndStream id
                 | 5uy -> CancelStream(id, reader.Text16())

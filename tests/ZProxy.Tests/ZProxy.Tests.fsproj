@@ -9,9 +9,14 @@
 
   <ItemGroup>
     <Compile Include="HttpWireTests.fs" />
+    <Compile Include="UsersTests.fs" />
+    <Compile Include="StatisticsTests.fs" />
+    <Compile Include="ManagementTests.fs" />
     <Compile Include="ProtocolTests.fs" />
     <Compile Include="CommandTests.fs" />
     <Compile Include="HttpUtilsTests.fs" />
+    <Compile Include="PluginTests.fs" />
+    <Compile Include="MeteringTests.fs" />
     <Compile Include="FlowTests.fs" />
     <Compile Include="SessionTests.fs" />
     <Compile Include="EndToEndTests.fs" />

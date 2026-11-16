@@ -37,27 +37,37 @@ module Options =
     type ClientOptions =
         { Listen: IPEndPoint
           Server: Uri
-          Password: string
+          UserUuid: string
           Limits: Limits
           ConnectTimeout: TimeSpan }
 
     type ServerOptions =
         { Listen: IPEndPoint
-          Password: string
+          AdminPassword: string
+          DataDirectory: string
+          WebListen: IPEndPoint
+          Gateway: Uri option
+          GatewayToken: string option
           Limits: Limits
           MaxTunnels: int
+          MaxUserTunnels: int
           HandshakeTimeout: TimeSpan }
 
-    let client listen server password =
+    let client listen server userUuid =
         { Listen = listen
           Server = server
-          Password = password
+          UserUuid = userUuid
           Limits = defaults
           ConnectTimeout = TimeSpan.FromSeconds(15.0) }
 
-    let server listen password =
+    let server listen adminPassword =
         { Listen = listen
-          Password = password
+          AdminPassword = adminPassword
+          DataDirectory = "data"
+          WebListen = IPEndPoint(IPAddress.Loopback, 18081)
+          Gateway = None
+          GatewayToken = None
           Limits = defaults
           MaxTunnels = 16
+          MaxUserTunnels = 2
           HandshakeTimeout = TimeSpan.FromSeconds(15.0) }

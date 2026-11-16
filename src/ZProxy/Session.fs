@@ -13,7 +13,7 @@ module Session =
                           callerToken: CancellationToken, onClose) =
         let lifetime = CancellationTokenSource.CreateLinkedTokenSource(parentToken, callerToken)
         let token = lifetime.Token
-        let headers = TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let headers = TaskCompletionSource<Contracts.RemoteReply>(TaskCreationOptions.RunContinuationsAsynchronously)
         let credit = Flow.SendWindow(window)
         let body = new Flow.ReceiveBody(window, (fun count -> post (Frame.WindowUpdate(id, count))), onClose)
         let gate = obj ()
@@ -59,7 +59,8 @@ module Session =
 
     /// Own one connection and all requests that use its compression history.
     type ProxySession(tunnel: Tunnel.EncryptedZstdTunnel, limits: Options.Limits,
-                      isClient: bool, upstream: ProxyHandler option,
+                      isClient: bool,
+                      upstream: (HttpRequestMessage -> CancellationToken -> Task<Contracts.RemoteReply>) option,
                       closeConnection: unit -> unit, ct: CancellationToken) =
         let gate = obj ()
         let streams = Dictionary<uint32, Exchange>()
@@ -149,18 +150,17 @@ module Session =
 
         let serve (state: Exchange) method target headers hasEnd = task {
             try
-                let uri = Uri(target, UriKind.Absolute)
-                if not (HttpUtils.validTarget uri) then
-                    raise (InvalidDataException("Unsupported origin URL."))
+                let uri = Contracts.logicalUri target
+                if method <> "POST" then raise (InvalidDataException("Unsupported completion method."))
                 use request = new HttpRequestMessage(HttpMethod(method), uri)
                 if not hasEnd || List.exists (fun (name: string, _) -> name.StartsWith("content-", StringComparison.OrdinalIgnoreCase)) headers then
                     request.Content <- new StreamContent(new Flow.BorrowedStream(state.Body))
                 HttpUtils.addRequestHeaders request headers
                 let! reply = upstream.Value request state.Token
-                use response = reply
+                use response = reply.Response
                 do! tunnel.SendAsync(
                     Frame.ResponseHeaders(state.Id, int response.StatusCode, HttpUtils.protocolByte response.Version,
-                                          HttpUtils.responseHeaders response, false), state.Token)
+                                          HttpUtils.responseHeaders response, reply.Metadata, false), state.Token)
                 let! body = response.Content.ReadAsStreamAsync(state.Token)
                 do! sendBody state body
                 closeStream state.Id None false
@@ -195,7 +195,7 @@ module Session =
                     if hasEnd then value.Body.Finish(None)
                     track id (fun () -> serve value method target headers hasEnd)
                 | None -> ()
-            | Frame.ResponseHeaders(id, status, version, headers, hasEnd) ->
+            | Frame.ResponseHeaders(id, status, version, headers, metadata, hasEnd) ->
                 if not isClient then raise (InvalidDataException("Unexpected response frame."))
                 match find id with
                 | None -> requirePastStream id
@@ -207,7 +207,7 @@ module Session =
                     response.Content <- new StreamContent(state.Body)
                     HttpUtils.addResponseHeaders response headers
                     if hasEnd then state.Body.Finish(None)
-                    if not (state.Headers.TrySetResult(response)) then response.Dispose()
+                    if not (state.Headers.TrySetResult({ Response = response; Metadata = metadata })) then response.Dispose()
             | Frame.Data(id, bytes, hasEnd) ->
                 match find id with
                 | None -> requirePastStream id // Data queued before cancellation can still arrive.
@@ -283,7 +283,7 @@ module Session =
 
         member _.SendAsync(request: HttpRequestMessage, callerToken: CancellationToken) = task {
             if not isClient then invalidOp "Only a client opens requests."
-            if not (HttpUtils.validTarget request.RequestUri) then invalidArg "request" "Invalid origin URL."
+            let path = Contracts.requestPath request
             use wait = CancellationTokenSource.CreateLinkedTokenSource(token, callerToken)
             do! slots.WaitAsync(wait.Token)
             let mutable registered = false
@@ -307,7 +307,7 @@ module Session =
                     state.WatchCancellation(fun () ->
                         closeStream id (Some (OperationCanceledException(callerToken))) true)
                     do! tunnel.SendAsync(
-                        Frame.OpenRequest(id, request.Method.Method, request.RequestUri.OriginalString,
+                        Frame.OpenRequest(id, request.Method.Method, path,
                                           HttpUtils.requestHeaders request, hasEnd), wait.Token)
                     state.OpenQueued <- true
                     // Cancellation can run between enqueueing Open and marking it queued.

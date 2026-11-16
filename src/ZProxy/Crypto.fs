@@ -5,31 +5,44 @@ open System.Buffers.Binary
 open System.Collections.Generic
 open System.Security.Cryptography
 open System.Text
-open Konscious.Security.Cryptography
 
 module Crypto =
 
     [<Literal>]
     let MaxChunkBytes = 65536
 
-    let MasterDomainSalt = SHA256.HashData("zproxy-v2-master-salt"B)
-    let InfoKeyC2S = "zproxy-v2-key-c2s"B
-    let InfoKeyS2C = "zproxy-v2-key-s2c"B
+    let InfoKeyC2S = "zproxy-v3-key-c2s"B
+    let InfoKeyS2C = "zproxy-v3-key-s2c"B
     let DirC2S = [| 0x43uy; 0x32uy; 0x53uy; 0uy |]
     let DirS2C = [| 0x53uy; 0x32uy; 0x43uy; 0uy |]
 
-    /// Derive the process key once. Argon2 memory is measured in KiB.
-    let deriveMasterKey (password: string) : byte[] =
-        let passwordBytes = Encoding.UTF8.GetBytes(password)
+    type UserCredential =
+        { Selector: byte[]
+          Key: byte[] }
+
+    /// UUIDs are random secrets. Keep public selectors separate from authentication keys.
+    let deriveUserCredential (uuid: string) : UserCredential =
+        let valid, parsed = Guid.TryParseExact(uuid, "D")
+        if not valid || isNull uuid || uuid.Length <> 36 then
+            invalidArg "uuid" "The user credential must be a version 4 UUID."
+        let canonical = parsed.ToString("D")
+        if not (uuid.Equals(canonical, StringComparison.OrdinalIgnoreCase))
+           || canonical[14] <> '4' || "89ab".IndexOf(canonical[19]) < 0 then
+            invalidArg "uuid" "The user credential must be a version 4 UUID."
+        let secret = Encoding.ASCII.GetBytes(canonical)
+        let derive (domain: byte[]) =
+            let input = Array.zeroCreate<byte> (domain.Length + secret.Length)
+            try
+                domain.CopyTo(input, 0)
+                secret.CopyTo(input, domain.Length)
+                SHA256.HashData(input)
+            finally
+                CryptographicOperations.ZeroMemory(input.AsSpan())
         try
-            use argon = new Argon2id(passwordBytes)
-            argon.Salt <- MasterDomainSalt
-            argon.DegreeOfParallelism <- 1
-            argon.Iterations <- 3
-            argon.MemorySize <- 65536
-            argon.GetBytes(32)
+            { Selector = derive "zproxy-v3-user-selector\000"B
+              Key = derive "zproxy-v3-user-key\000"B }
         finally
-            CryptographicOperations.ZeroMemory(passwordBytes.AsSpan())
+            CryptographicOperations.ZeroMemory(secret.AsSpan())
 
     [<Struct>]
     type Preamble =
@@ -83,12 +96,12 @@ module Crypto =
         { KeyC2S: byte[]
           KeyS2C: byte[] }
 
-    let deriveSessionKeys (masterKey: byte[]) (preambleBytes: byte[]) : SessionKeys =
-        if isNull masterKey || masterKey.Length <> 32 then
-            invalidArg "masterKey" "Master key must contain 32 bytes"
+    let deriveSessionKeys (userKey: byte[]) (preambleBytes: byte[]) : SessionKeys =
+        if isNull userKey || userKey.Length <> 32 then
+            invalidArg "userKey" "User key must contain 32 bytes"
         if isNull preambleBytes || preambleBytes.Length <> 32 then
             invalidArg "preambleBytes" "Preamble must contain 32 bytes"
-        let prk = HKDF.Extract(HashAlgorithmName.SHA256, masterKey, preambleBytes)
+        let prk = HKDF.Extract(HashAlgorithmName.SHA256, userKey, preambleBytes)
         try
             { KeyC2S = HKDF.Expand(HashAlgorithmName.SHA256, prk, 32, InfoKeyC2S)
               KeyS2C = HKDF.Expand(HashAlgorithmName.SHA256, prk, 32, InfoKeyS2C) }

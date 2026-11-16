@@ -10,7 +10,7 @@ open System.Threading.Tasks
 module Handshake =
     let private encode (limits: Options.Limits) =
         let bytes = Array.zeroCreate<byte> 12
-        "ZPX2"B.CopyTo(bytes, 0)
+        "ZPX3"B.CopyTo(bytes, 0)
         bytes[4] <- byte limits.UploadWindowLog
         bytes[5] <- byte limits.DownloadWindowLog
         BinaryPrimitives.WriteUInt16BigEndian(bytes.AsSpan(6, 2), uint16 limits.MaxStreams)
@@ -18,7 +18,7 @@ module Handshake =
         bytes
 
     let private decode (bytes: byte[]) =
-        if bytes.Length <> 12 || not (bytes.AsSpan(0, 4).SequenceEqual("ZPX2"B)) then
+        if bytes.Length <> 12 || not (bytes.AsSpan(0, 4).SequenceEqual("ZPX3"B)) then
             raise (InvalidDataException("Unsupported tunnel handshake."))
         Options.validate
             { UploadWindowLog = int bytes[4]
@@ -62,15 +62,19 @@ module Handshake =
         CryptographicOperations.ZeroMemory(keys.KeyC2S.AsSpan())
         CryptographicOperations.ZeroMemory(keys.KeyS2C.AsSpan())
 
-    let connect (wire: HttpWire.Connection) (server: Uri) master limits ct = task {
+    let connect (wire: HttpWire.Connection) (server: Uri) (credential: Crypto.UserCredential) limits ct = task {
         Options.validate limits |> ignore
+        if isNull (box credential) || isNull credential.Selector || credential.Selector.Length <> 32
+           || isNull credential.Key || credential.Key.Length <> 32 then
+            invalidArg "credential" "Invalid user credential."
         let preamble, _ = Crypto.createPreamble ()
-        let keys = Crypto.deriveSessionKeys master preamble
+        let keys = Crypto.deriveSessionKeys credential.Key preamble
         try
             do! wire.WriteHeadAsync(
                 { StartLine = "POST /tunnel HTTP/1.1"
                   Headers = [ "Host", server.Authority; "Content-Type", "application/octet-stream"
                               "Transfer-Encoding", "chunked"; "Connection", "keep-alive" ] }, ct)
+            do! wire.Body.WriteAsync(credential.Selector.AsMemory(), ct)
             do! wire.Body.WriteAsync(preamble.AsMemory(), ct)
             do! writeHello wire.Body keys.KeyC2S Crypto.DirC2S preamble limits ct
             let! response = wire.ReadHeadAsync(ct)
@@ -86,7 +90,8 @@ module Handshake =
             return raise error
     }
 
-    let accept (wire: HttpWire.Connection) master allowed (replay: Crypto.ReplayFilter) ct = task {
+    let accept (wire: HttpWire.Connection) (resolve: byte[] -> Users.AuthEntry option)
+               allowed (replay: Crypto.ReplayFilter) (ct: CancellationToken) = task {
         let! request = wire.ReadHeadAsync(ct)
         if request.StartLine <> "POST /tunnel HTTP/1.1" then
             raise (InvalidDataException("Unknown tunnel route."))
@@ -94,27 +99,43 @@ module Handshake =
         match headerValues "host" request with
         | [ host ] when not (String.IsNullOrWhiteSpace(host)) -> ()
         | _ -> raise (InvalidDataException("The tunnel requires one Host field."))
-        let preamble = Array.zeroCreate<byte> 32
-        do! wire.Body.ReadExactlyAsync(preamble.AsMemory(), ct)
-        let parsed =
-            match Crypto.parsePreamble (ReadOnlySpan(preamble)) with
-            | Ok value -> value
-            | Error error -> raise (InvalidDataException(error))
-        let keys = Crypto.deriveSessionKeys master preamble
+        let selector = Array.zeroCreate<byte> 32
+        do! wire.Body.ReadExactlyAsync(selector.AsMemory(), ct)
+        let entry =
+            match resolve selector with
+            | Some entry -> entry
+            | None -> raise (InvalidDataException("The tunnel credentials were rejected."))
         try
-            let! offered = readHello wire.Body keys.KeyC2S Crypto.DirC2S preamble ct
-            // Only authenticated handshakes can occupy the replay table.
-            if not (replay.Validate(parsed)) then
-                raise (InvalidDataException("The handshake expired or was already used."))
-            let agreed = Options.negotiate offered allowed
-            do! wire.WriteHeadAsync(
-                { StartLine = "HTTP/1.1 200 OK"
-                  Headers = [ "Content-Type", "application/octet-stream"
-                              "Transfer-Encoding", "chunked"; "Connection", "keep-alive"
-                              "Cache-Control", "no-store" ] }, ct)
-            do! writeHello wire.Body keys.KeyS2C Crypto.DirS2C preamble agreed ct
-            return keys, preamble, agreed
-        with error ->
-            zeroKeys keys
-            return raise error
+            if entry.Revoked.IsCancellationRequested then
+                raise (InvalidDataException("The tunnel credentials were rejected."))
+            use active = CancellationTokenSource.CreateLinkedTokenSource(ct, entry.Revoked)
+            let preamble = Array.zeroCreate<byte> 32
+            do! wire.Body.ReadExactlyAsync(preamble.AsMemory(), active.Token)
+            let parsed =
+                match Crypto.parsePreamble (ReadOnlySpan(preamble)) with
+                | Ok value -> value
+                | Error error -> raise (InvalidDataException(error))
+            let keys = Crypto.deriveSessionKeys entry.Key preamble
+            CryptographicOperations.ZeroMemory(entry.Key.AsSpan())
+            try
+                let! offered = readHello wire.Body keys.KeyC2S Crypto.DirC2S preamble active.Token
+                if entry.Revoked.IsCancellationRequested then
+                    raise (InvalidDataException("The tunnel credentials were rejected."))
+                // Only authenticated users can occupy the replay table.
+                if not (replay.Validate(parsed)) then
+                    raise (InvalidDataException("The handshake expired or was already used."))
+                let agreed = Options.negotiate offered allowed
+                do! wire.WriteHeadAsync(
+                    { StartLine = "HTTP/1.1 200 OK"
+                      Headers = [ "Content-Type", "application/octet-stream"
+                                  "Transfer-Encoding", "chunked"; "Connection", "keep-alive"
+                                  "Cache-Control", "no-store" ] }, active.Token)
+                do! writeHello wire.Body keys.KeyS2C Crypto.DirS2C preamble agreed active.Token
+                active.Token.ThrowIfCancellationRequested()
+                return entry, keys, preamble, agreed
+            with error ->
+                zeroKeys keys
+                return raise error
+        finally
+            CryptographicOperations.ZeroMemory(entry.Key.AsSpan())
     }

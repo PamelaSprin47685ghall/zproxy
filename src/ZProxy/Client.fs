@@ -19,7 +19,7 @@ open Microsoft.Extensions.Logging
 module Client =
     /// One local process uses one live tunnel. Failed requests are never retried here.
     type private ConnectionOwner(options: Options.ClientOptions, ct: CancellationToken) =
-        let master = Crypto.deriveMasterKey options.Password
+        let credential = Crypto.deriveUserCredential options.UserUuid
         let lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct)
         let gate = new SemaphoreSlim(1, 1)
         let mutable current: Session.ProxySession option = None
@@ -33,7 +33,7 @@ module Client =
                 do! tcp.ConnectAsync(options.Server.DnsSafeHost, options.Server.Port, deadline.Token)
                 let wire = new HttpWire.Connection(tcp.GetStream())
                 try
-                    let! keys, preamble, agreed = Handshake.connect wire options.Server master options.Limits deadline.Token
+                    let! keys, preamble, agreed = Handshake.connect wire options.Server credential options.Limits deadline.Token
                     let tunnel =
                         try
                             new Tunnel.EncryptedZstdTunnel(wire.Body, keys, preamble, true,
@@ -87,7 +87,7 @@ module Client =
                 | None -> ()
                 current <- None
             finally
-                CryptographicOperations.ZeroMemory(master.AsSpan())
+                CryptographicOperations.ZeroMemory(credential.Key.AsSpan())
                 gate.Release() |> ignore
         }
 
@@ -95,18 +95,18 @@ module Client =
             member _.Dispose() =
                 lifetime.Cancel()
                 current |> Option.iter (fun session -> (session :> IDisposable).Dispose())
-                CryptographicOperations.ZeroMemory(master.AsSpan())
+                CryptographicOperations.ZeroMemory(credential.Key.AsSpan())
                 lifetime.Dispose()
 
     let private proxy (handler: ProxyHandler) (context: HttpContext) = task {
         let token = context.RequestAborted
         try
             let raw = context.Features.Get<IHttpRequestFeature>().RawTarget
-            match HttpUtils.parseTargetUrl raw with
-            | Error message ->
-                context.Response.StatusCode <- StatusCodes.Status400BadRequest
-                do! context.Response.WriteAsync(message, token)
-            | Ok target ->
+            if context.Request.Method <> "POST" || not (Contracts.isCompletionPath raw) then
+                context.Response.StatusCode <- StatusCodes.Status404NotFound
+                do! context.Response.WriteAsync("Use a POST completion endpoint.", token)
+            else
+                let target = Contracts.logicalUri raw
                 use request = new HttpRequestMessage(HttpMethod(context.Request.Method), target)
                 let headers =
                     [ for header in context.Request.Headers do
@@ -147,16 +147,21 @@ module Client =
                 do! context.Response.WriteAsync("The proxy request failed. It was not replayed.", token)
     }
 
-    let run (options: Options.ClientOptions) (plugins: IProxyPlugin list) (ct: CancellationToken) = task {
+    let runWithDecoders (options: Options.ClientOptions) (plugins: IProxyPlugin list)
+                        (decoders: IResponseDecoder list) (ct: CancellationToken) = task {
         Options.validate options.Limits |> ignore
-        if String.IsNullOrWhiteSpace(options.Password) then invalidArg "options" "A password is required."
+        if String.IsNullOrWhiteSpace(options.UserUuid) then invalidArg "options" "A user UUID is required."
         if not options.Server.IsAbsoluteUri || options.Server.Scheme <> "http"
            || options.Server.UserInfo <> "" || options.Server.Query <> "" || options.Server.Fragment <> ""
            || options.Server.Port < 1
            || (options.Server.AbsolutePath <> "/" && options.Server.AbsolutePath <> "/tunnel") then
             invalidArg "options" "The tunnel server must name an HTTP authority or /tunnel endpoint."
         use connection = new ConnectionOwner(options, ct)
-        let handler = Plugins.compose plugins connection.SendAsync
+        let send request token = task {
+            let! reply = connection.SendAsync request token
+            return! Plugins.decode decoders request reply token
+        }
+        let handler = Plugins.compose plugins send
         let builder = WebApplication.CreateSlimBuilder([||])
         builder.Logging.ClearProviders() |> ignore
         builder.WebHost.ConfigureKestrel(fun server ->
@@ -177,3 +182,5 @@ module Client =
         do! connection.CloseAsync()
         match failure with Some error -> return raise error | None -> return ()
     }
+
+    let run options plugins ct = runWithDecoders options plugins [] ct
