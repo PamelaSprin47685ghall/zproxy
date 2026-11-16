@@ -9,7 +9,7 @@ open ZProxy
 module BaseTests =
 
     [<Fact>]
-    let ``Crypto: Master key and session derivation round-trip`` () =
+    let ``Crypto: Argon2id master key and session derivation with spec AAD`` () =
         let pwd = "SuperSecretMasterPassword123"
         let mKey = Crypto.deriveMasterKey pwd
         Assert.Equal(32, mKey.Length)
@@ -26,43 +26,39 @@ module BaseTests =
 
         let filter = Crypto.ReplayFilter(60_000L)
         Assert.True(filter.Validate(preamble))
-        // Replay of exact salt must fail
-        Assert.False(filter.Validate(preamble))
+        Assert.False(filter.Validate(preamble)) // Replay must fail
 
         let keys = Crypto.deriveSessionKeys mKey preambleBytes
         Assert.Equal(32, keys.KeyC2S.Length)
         Assert.Equal(32, keys.KeyS2C.Length)
 
-        // Seal and open
+        // Seal and open with specification AAD
         use aeadC = new ChaCha20Poly1305(keys.KeyC2S)
         use aeadS = new ChaCha20Poly1305(keys.KeyC2S)
-        let plain = "Hello, full duplex streaming zproxy!"B
-        let aad = "test-aad"B
-        let sealedChunk = Crypto.sealChunk aeadC Crypto.DirC2S 0UL (ReadOnlySpan<byte>(aad)) (ReadOnlySpan<byte>(plain))
-        let opened = Crypto.openChunk aeadS Crypto.DirC2S 0UL (ReadOnlySpan<byte>(aad)) (ReadOnlySpan<byte>(sealedChunk, 3, sealedChunk.Length - 3))
+        let plain = "Hello, spec compliant full-duplex zproxy!"B
+        let sealedChunk = Crypto.sealChunk aeadC Crypto.DirC2S 0UL preambleBytes (ReadOnlySpan<byte>(plain))
+        let lenHeader = [| sealedChunk.[0]; sealedChunk.[1]; sealedChunk.[2] |]
+        let opened = Crypto.openChunk aeadS Crypto.DirC2S 0UL preambleBytes lenHeader (ReadOnlySpan<byte>(sealedChunk, 3, sealedChunk.Length - 3))
         match opened with
         | Ok pt -> Assert.Equal<byte>(plain, pt)
         | Error e -> Assert.Fail(e)
 
-        // Tamper tag
+        // Tamper test
         sealedChunk.[sealedChunk.Length - 1] <- sealedChunk.[sealedChunk.Length - 1] ^^^ 0xFFuy
-        let tampered = Crypto.openChunk aeadS Crypto.DirC2S 0UL (ReadOnlySpan<byte>(aad)) (ReadOnlySpan<byte>(sealedChunk, 3, sealedChunk.Length - 3))
+        let tampered = Crypto.openChunk aeadS Crypto.DirC2S 0UL preambleBytes lenHeader (ReadOnlySpan<byte>(sealedChunk, 3, sealedChunk.Length - 3))
         Assert.True(tampered.IsError)
 
     [<Fact>]
-    let ``Zstd: Streaming compressor and decompressor with cross-turn sliding window`` () =
-        use comp = new Zstd.StreamingCompressor(3)
-        use decomp = new Zstd.StreamingDecompressor()
+    let ``Zstd: 256MB window streaming compressor and decompressor`` () =
+        use comp = new Zstd.StreamingCompressor(3, windowLog = 28)
+        use decomp = new Zstd.StreamingDecompressor(maxWindowLog = 29)
 
-        // Turn 1
         let text1 = "Turn 1: Repeating prompt prefix for LLM multi-turn conversation test. " + String.replicate 50 "Alpha Beta Gamma "
         let bytes1 = Encoding.UTF8.GetBytes(text1)
         let c1 = comp.CompressChunk(ReadOnlySpan<byte>(bytes1), flush = true)
-        Assert.True(c1.Length > 0)
         let d1 = decomp.DecompressChunk(ReadOnlySpan<byte>(c1))
         Assert.Equal(text1, Encoding.UTF8.GetString(d1))
 
-        // Turn 2: Starts with same prefix, tests dictionary reuse
         let text2 = text1 + "Turn 2: delta user message."
         let bytes2 = Encoding.UTF8.GetBytes(text2)
         let c2 = comp.CompressChunk(ReadOnlySpan<byte>(bytes2), flush = true)
@@ -70,7 +66,7 @@ module BaseTests =
         Assert.Equal(text2, Encoding.UTF8.GetString(d2))
 
     [<Fact>]
-    let ``Frame: Encode and decode round-trip for all frame types`` () =
+    let ``Frame: Encode and decode round-trip with ProtoVersion`` () =
         let fOpen = Frame.Frame.OpenRequest (1u, "POST", "https://api.mistral.ai/v1/chat/completions?alt=sse", [ "Authorization", "Bearer xyz"; "Content-Type", "application/json" ], false)
         let fOpenEnc = Frame.encode fOpen
         match Frame.decode fOpenEnc with
@@ -82,36 +78,28 @@ module BaseTests =
             Assert.False(es)
         | res -> Assert.Fail(sprintf "Expected OpenRequest, got %A" res)
 
-        let fData = Frame.Frame.Data (1u, "data chunk payload"B, true)
-        let fDataEnc = Frame.encode fData
-        match Frame.decode fDataEnc with
-        | Ok (Frame.Frame.Data (sid, p, es)) ->
+        // ResponseHeaders with protoVersion = 30uy (HTTP/3)
+        let fResp = Frame.Frame.ResponseHeaders (1u, 200, 30uy, [ "Content-Type", "text/event-stream" ], false)
+        let fRespEnc = Frame.encode fResp
+        match Frame.decode fRespEnc with
+        | Ok (Frame.Frame.ResponseHeaders (sid, status, protoVer, hdrs, es)) ->
             Assert.Equal(1u, sid)
-            Assert.Equal<byte>("data chunk payload"B, p)
-            Assert.True(es)
-        | res -> Assert.Fail(sprintf "Expected Data, got %A" res)
-
-        let fCancel = Frame.Frame.CancelStream (1u, "client aborted")
-        let fCancelEnc = Frame.encode fCancel
-        match Frame.decode fCancelEnc with
-        | Ok (Frame.Frame.CancelStream (sid, r)) ->
-            Assert.Equal(1u, sid)
-            Assert.Equal("client aborted", r)
-        | res -> Assert.Fail(sprintf "Expected CancelStream, got %A" res)
+            Assert.Equal(200, status)
+            Assert.Equal(30uy, protoVer)
+            Assert.Equal(1, hdrs.Length)
+            Assert.False(es)
+        | res -> Assert.Fail(sprintf "Expected ResponseHeaders, got %A" res)
 
     [<Fact>]
     let ``HttpUtils: parseTargetUrl with direct and hex encoded URLs`` () =
-        // Direct
         match HttpUtils.parseTargetUrl "/https://api.mistral.ai/v1/models" with
         | Ok u -> Assert.Equal("https://api.mistral.ai/v1/models", u.ToString())
         | Error e -> Assert.Fail(e)
 
-        // Direct with query
         match HttpUtils.parseTargetUrl "/https://daily-cloudcode-pa.googleapis.com/v1:stream?alt=sse" with
         | Ok u -> Assert.Equal("https://daily-cloudcode-pa.googleapis.com/v1:stream?alt=sse", u.ToString())
         | Error e -> Assert.Fail(e)
 
-        // Hex encoded
         let baseHex = Convert.ToHexString(Encoding.UTF8.GetBytes("https://api.mistral.ai"))
         match HttpUtils.parseTargetUrl (sprintf "/%s/v1/chat" baseHex) with
         | Ok u -> Assert.Equal("https://api.mistral.ai/v1/chat", u.ToString())

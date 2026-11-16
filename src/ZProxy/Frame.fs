@@ -25,7 +25,7 @@ module Frame =
 
     type Frame =
         | OpenRequest of streamId: uint32 * method: string * targetUrl: string * headers: HeaderPair list * hasEndStream: bool
-        | ResponseHeaders of streamId: uint32 * statusCode: int * headers: HeaderPair list * hasEndStream: bool
+        | ResponseHeaders of streamId: uint32 * statusCode: int * protoVersion: byte * headers: HeaderPair list * hasEndStream: bool
         | Data of streamId: uint32 * payload: byte[] * hasEndStream: bool
         | EndStream of streamId: uint32
         | CancelStream of streamId: uint32 * reason: string
@@ -63,7 +63,7 @@ module Frame =
             acc <- (k, v) :: acc
         List.rev acc
 
-    /// Encode logical Frame into [8-byte header][Payload]
+    /// Encode logical Frame into [8-byte header][Payload] per AGENTS.md 5.2
     let encode (frame: Frame) : byte[] =
         use ms = new MemoryStream()
         use bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen = true)
@@ -84,13 +84,14 @@ module Frame =
             writeStringWithLen16 bw url
             writeHeaders bw hdrs
 
-        | Frame.ResponseHeaders (sid, status, hdrs, es) ->
+        | Frame.ResponseHeaders (sid, status, protoVer, hdrs, es) ->
             streamId <- sid
             fType <- FrameType.ResponseHeaders
             if es then flags <- flags ||| FrameFlags.EndStream
             let statusBuf = Array.zeroCreate<byte> 2
             BinaryPrimitives.WriteUInt16BigEndian(Span<byte>(statusBuf), uint16 status)
             bw.Write(statusBuf)
+            bw.Write(protoVer)
             writeHeaders bw hdrs
 
         | Frame.Data (sid, payload, es) ->
@@ -129,7 +130,7 @@ module Frame =
         BinaryPrimitives.WriteUInt16BigEndian(Span<byte>(buf, 6, 2), uint16 payloadLen)
         buf
 
-    /// Decode logical Frame from raw bytes
+    /// Decode logical Frame from raw bytes per AGENTS.md 5.2
     let decode (bytes: byte[]) : Result<Frame, string> =
         if bytes.Length < 8 then
             Error "Header too short"
@@ -156,12 +157,13 @@ module Frame =
                         Ok (Frame.OpenRequest (streamId, method, url, headers, hasEndStream))
 
                 | FrameType.ResponseHeaders ->
-                    if payloadLen < 2 then Error "Empty ResponseHeaders payload"
+                    if payloadLen < 3 then Error "Empty ResponseHeaders payload (needs status + protoVer)"
                     else
                         let statusBytes = br.ReadBytes(2)
                         let status = int (BinaryPrimitives.ReadUInt16BigEndian(ReadOnlySpan<byte>(statusBytes)))
+                        let protoVer = br.ReadByte()
                         let headers = readHeaders br
-                        Ok (Frame.ResponseHeaders (streamId, status, headers, hasEndStream))
+                        Ok (Frame.ResponseHeaders (streamId, status, protoVer, headers, hasEndStream))
 
                 | FrameType.Data ->
                     let data = br.ReadBytes(payloadLen)

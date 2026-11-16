@@ -14,7 +14,7 @@ module Client =
 
     type InflightStream =
         { OutgoingBodyChannel: ChannelWriter<byte[]>
-          ResponseHeadersTask: TaskCompletionSource<int * (string * string) list * bool>
+          ResponseHeadersTask: TaskCompletionSource<int * byte * (string * string) list * bool>
           ResponseBodyChannel: Channel<byte[] * bool>
           Cts: CancellationTokenSource }
 
@@ -36,9 +36,9 @@ module Client =
                         | None -> active <- false
                         | Some frame ->
                             match frame with
-                            | Frame.Frame.ResponseHeaders (sid, status, hdrs, es) ->
+                            | Frame.Frame.ResponseHeaders (sid, status, protoVer, hdrs, es) ->
                                 match inflight.TryGetValue(sid) with
-                                | true, s -> s.ResponseHeadersTask.TrySetResult((status, hdrs, es)) |> ignore
+                                | true, s -> s.ResponseHeadersTask.TrySetResult((status, protoVer, hdrs, es)) |> ignore
                                 | _ -> ()
 
                             | Frame.Frame.Data (sid, data, es) ->
@@ -88,11 +88,35 @@ module Client =
                         let tcp = new TcpClient()
                         do! tcp.ConnectAsync(serverUri.Host, serverUri.Port, ct)
                         let ns = tcp.GetStream()
+
+                        // Send standard HTTP/1.1 Upgrade request per AGENTS.md 3.2
                         let preambleBytes, preamble = Crypto.createPreamble ()
-                        do! ns.WriteAsync(preambleBytes.AsMemory(), ct)
+                        let preambleB64 = Convert.ToBase64String(preambleBytes).Replace("+", "-").Replace("/", "_").TrimEnd('=')
+                        let upgradeReq =
+                            sprintf "POST /api/v1/stream HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: zproxy-v1\r\nX-Zproxy-Preamble: %s\r\n\r\n"
+                                serverUri.Authority preambleB64
+                        let reqBytes = Encoding.ASCII.GetBytes(upgradeReq)
+                        do! ns.WriteAsync(reqBytes.AsMemory(), ct)
                         do! ns.FlushAsync(ct)
+
+                        // Read HTTP/1.1 101 Switching Protocols response
+                        let headerBuf = Array.zeroCreate<byte> 1024
+                        let mutable hRead = 0
+                        let mutable endOfHeader = -1
+                        while endOfHeader = -1 do
+                            let! r = ns.ReadAsync(headerBuf.AsMemory(hRead, headerBuf.Length - hRead), ct)
+                            if r = 0 then failwith "Server closed connection during HTTP/1.1 Upgrade handshake"
+                            hRead <- hRead + r
+                            for i in 0 .. hRead - 4 do
+                                if headerBuf.[i] = 0x0Duy && headerBuf.[i+1] = 0x0Auy && headerBuf.[i+2] = 0x0Duy && headerBuf.[i+3] = 0x0Auy then
+                                    endOfHeader <- i + 4
+
+                        let respLine = Encoding.ASCII.GetString(headerBuf, 0, min hRead 32)
+                        if not (respLine.StartsWith("HTTP/1.1 101")) then
+                            failwithf "Server rejected HTTP/1.1 Upgrade: %s" respLine
+
                         let sessionKeys = Crypto.deriveSessionKeys masterKey preambleBytes
-                        let tunnel = new Tunnel.EncryptedZstdTunnel(ns, sessionKeys, isClient = true)
+                        let tunnel = new Tunnel.EncryptedZstdTunnel(ns, sessionKeys, preambleBytes, isClient = true)
                         currentTunnel <- Some tunnel
                         currentTcp <- Some tcp
                         Task.Run(Func<Task>(fun () -> readLoop tunnel tcp :> Task)) |> ignore
@@ -105,7 +129,7 @@ module Client =
             let sid = Interlocked.Add(&nextStreamId, 2u) - 2u // Odd numbers: 1, 3, 5...
             let outBody = Channel.CreateUnbounded<byte[]>()
             let inBody = Channel.CreateUnbounded<byte[] * bool>()
-            let tcs = TaskCompletionSource<int * (string * string) list * bool>()
+            let tcs = TaskCompletionSource<int * byte * (string * string) list * bool>()
             let cts = new CancellationTokenSource()
             let stream =
                 { OutgoingBodyChannel = outBody.Writer
@@ -143,7 +167,6 @@ module Client =
 
             let mutable keepAlive = true
             while keepAlive && not rootCt.IsCancellationRequested do
-                // Read HTTP headers without StreamReader buffering leak
                 use headerMs = new MemoryStream()
                 let readBuf = Array.zeroCreate<byte> 4096
                 let mutable headerEndIdx = -1
@@ -157,7 +180,6 @@ module Client =
                         let prevLen = int headerMs.Length
                         headerMs.Write(readBuf, 0, r)
                         let fullArr = headerMs.ToArray()
-                        let checkStart = max 0 (prevLen - 3)
                         let idx = findHeaderEnd fullArr fullArr.Length
                         if idx <> -1 then
                             headerEndIdx <- idx
@@ -211,7 +233,6 @@ module Client =
                                     task {
                                         try
                                             let mutable remaining = contentLength
-                                            // 1. Send any leftover bytes from header read
                                             if leftoverBody.Length > 0 then
                                                 let count = int (min (int64 leftoverBody.Length) remaining)
                                                 remaining <- remaining - int64 count
@@ -219,7 +240,6 @@ module Client =
                                                 let slice = leftoverBody.Slice(0, count).ToArray()
                                                 do! tunnel.SendFrameAsync(Frame.Frame.Data(sid, slice, isEnd), rootCt)
 
-                                            // 2. Read remaining from socket stream
                                             let buf = Array.zeroCreate<byte> 16384
                                             while remaining > 0L do
                                                 let toRead = int (min (int64 buf.Length) remaining)
@@ -239,7 +259,7 @@ module Client =
                                     } :> Task
                                 )) |> ignore
 
-                            let! status, respHeaders, respHasEnd = streamState.ResponseHeadersTask.Task
+                            let! status, protoVer, respHeaders, respHasEnd = streamState.ResponseHeadersTask.Task
                             let sb = StringBuilder()
                             sb.AppendFormat("HTTP/1.1 {0} OK\r\n", status) |> ignore
                             let mutable hasChunked = false
@@ -248,6 +268,9 @@ module Client =
                                     sb.AppendFormat("{0}: {1}\r\n", k, v) |> ignore
                                     if k.Equals("transfer-encoding", StringComparison.OrdinalIgnoreCase) && v.Contains("chunked") then
                                         hasChunked <- true
+                            let protoStr = if protoVer = 30uy then "HTTP/3.0" elif protoVer = 20uy then "HTTP/2.0" else "HTTP/1.1"
+                            sb.AppendFormat("X-Upstream-Proto: {0}\r\n", protoStr) |> ignore
+
                             if not hasChunked && not (List.exists (fun (k: string, _) -> k.Equals("content-length", StringComparison.OrdinalIgnoreCase)) respHeaders) then
                                 sb.Append("Transfer-Encoding: chunked\r\n") |> ignore
                                 hasChunked <- true
@@ -258,29 +281,29 @@ module Client =
                             do! stream.FlushAsync(rootCt)
 
                             if not respHasEnd then
-                                let mutable bodyLoop = true
-                                while bodyLoop do
-                                    let! more = streamState.ResponseBodyChannel.Reader.WaitToReadAsync(rootCt)
-                                    if more then
-                                        let mutable item = (Array.empty, false)
-                                        while streamState.ResponseBodyChannel.Reader.TryRead(&item) do
-                                            let (data, isEnd) = item
-                                            if data.Length > 0 then
-                                                if hasChunked then
-                                                    let chunkHeader = Encoding.ASCII.GetBytes(sprintf "%x\r\n" data.Length)
-                                                    do! stream.WriteAsync(chunkHeader.AsMemory(), rootCt)
-                                                    do! stream.WriteAsync(data.AsMemory(), rootCt)
-                                                    do! stream.WriteAsync("\r\n"B.AsMemory(), rootCt)
-                                                else
-                                                    do! stream.WriteAsync(data.AsMemory(), rootCt)
-                                                do! stream.FlushAsync(rootCt)
-                                            if isEnd then bodyLoop <- false
-                                    else
-                                        bodyLoop <- false
+                                    let mutable bodyLoop = true
+                                    while bodyLoop do
+                                        let! more = streamState.ResponseBodyChannel.Reader.WaitToReadAsync(rootCt)
+                                        if more then
+                                            let mutable item = (Array.empty, false)
+                                            while streamState.ResponseBodyChannel.Reader.TryRead(&item) do
+                                                let (data, isEnd) = item
+                                                if data.Length > 0 then
+                                                    if hasChunked then
+                                                        let chunkHeader = Encoding.ASCII.GetBytes(sprintf "%x\r\n" data.Length)
+                                                        do! stream.WriteAsync(chunkHeader.AsMemory(), rootCt)
+                                                        do! stream.WriteAsync(data.AsMemory(), rootCt)
+                                                        do! stream.WriteAsync("\r\n"B.AsMemory(), rootCt)
+                                                    else
+                                                        do! stream.WriteAsync(data.AsMemory(), rootCt)
+                                                    do! stream.FlushAsync(rootCt)
+                                                if isEnd then bodyLoop <- false
+                                        else
+                                            bodyLoop <- false
 
-                                if hasChunked then
-                                    do! stream.WriteAsync("0\r\n\r\n"B.AsMemory(), rootCt)
-                                    do! stream.FlushAsync(rootCt)
+                                    if hasChunked then
+                                        do! stream.WriteAsync("0\r\n\r\n"B.AsMemory(), rootCt)
+                                        do! stream.FlushAsync(rootCt)
                         with ex ->
                             manager.CancelStream(sid)
                             let errResp = sprintf "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s" ex.Message.Length ex.Message

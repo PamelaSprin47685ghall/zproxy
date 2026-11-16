@@ -11,7 +11,7 @@ open System.Threading.Tasks
 module Tunnel =
 
     /// Pipe handles AEAD sealing/opening + streaming Zstd compression/decompression over a duplex Stream
-    type EncryptedZstdTunnel(rawStream: Stream, sessionKeys: Crypto.SessionKeys, isClient: bool) =
+    type EncryptedZstdTunnel(rawStream: Stream, sessionKeys: Crypto.SessionKeys, preambleBytes: byte[], isClient: bool) =
         let myDir = if isClient then Crypto.DirC2S else Crypto.DirS2C
         let peerDir = if isClient then Crypto.DirS2C else Crypto.DirC2S
         let encKey = if isClient then sessionKeys.KeyC2S else sessionKeys.KeyS2C
@@ -28,7 +28,6 @@ module Tunnel =
         let sendLock = new SemaphoreSlim(1, 1)
         let decompBuffer = new MemoryStream()
 
-        /// Read exact count of bytes from stream
         let readExact (s: Stream) (count: int) (ct: CancellationToken) : Task<byte[]> =
             task {
                 let buf = Array.zeroCreate<byte> count
@@ -48,19 +47,14 @@ module Tunnel =
                     return buf
             }
 
-        /// Send logical frame through Zstd flush + AEAD seal
+        /// Send logical frame through Zstd flush + AEAD seal per AGENTS.md 4.2 & 4.3
         member this.SendFrameAsync(frame: Frame.Frame, ct: CancellationToken) : Task<unit> =
             task {
                 let frameBytes = Frame.encode frame
                 do! sendLock.WaitAsync(ct)
                 try
                     let compressed = compressor.CompressChunk(ReadOnlySpan<byte>(frameBytes), flush = true)
-                    let aad =
-                        if sendSeq = 0UL then
-                            "zproxy-chunk-0"B
-                        else
-                            "zproxy-chunk-n"B
-                    let sealedChunk = Crypto.sealChunk aeadEnc myDir sendSeq (ReadOnlySpan<byte>(aad)) (ReadOnlySpan<byte>(compressed))
+                    let sealedChunk = Crypto.sealChunk aeadEnc myDir sendSeq preambleBytes (ReadOnlySpan<byte>(compressed))
                     sendSeq <- sendSeq + 1UL
                     do! rawStream.WriteAsync(sealedChunk.AsMemory(), ct)
                     do! rawStream.FlushAsync(ct)
@@ -68,7 +62,7 @@ module Tunnel =
                     sendLock.Release() |> ignore
             }
 
-        /// Receive next logical frame by pulling AEAD chunks and decompressing
+        /// Receive next logical frame by pulling AEAD chunks and decompressing per AGENTS.md 4.2 & 4.3
         member this.ReceiveFrameAsync(ct: CancellationToken) : Task<Frame.Frame option> =
             task {
                 let mutable resultFrame = None
@@ -107,10 +101,7 @@ module Tunnel =
                         else
                             let ptLen = (int lenHeader.[0] <<< 16) ||| (int lenHeader.[1] <<< 8) ||| (int lenHeader.[2])
                             let! ctWithTag = readExact rawStream (ptLen + 16) ct
-                            let aad =
-                                if recvSeq = 0UL then "zproxy-chunk-0"B
-                                else "zproxy-chunk-n"B
-                            match Crypto.openChunk aeadDec peerDir recvSeq (ReadOnlySpan<byte>(aad)) (ReadOnlySpan<byte>(ctWithTag)) with
+                            match Crypto.openChunk aeadDec peerDir recvSeq preambleBytes lenHeader (ReadOnlySpan<byte>(ctWithTag)) with
                             | Error e -> failwithf "AEAD Decrypt error: %s" e
                             | Ok compressed ->
                                 recvSeq <- recvSeq + 1UL

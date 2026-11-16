@@ -5,19 +5,25 @@ open System.Buffers.Binary
 open System.Collections.Concurrent
 open System.Security.Cryptography
 open System.Text
+open Konscious.Security.Cryptography
 
 module Crypto =
 
-    let MasterDomainSalt = "zproxy-v1-master-salt"B
+    let MasterDomainSalt = SHA256.HashData("zproxy-v1-master-salt"B) // 32 bytes
     let InfoKeyC2S = "zproxy-v1-key-c2s"B
     let InfoKeyS2C = "zproxy-v1-key-s2c"B
     let DirC2S = [| 0x43uy; 0x32uy; 0x53uy; 0x00uy |] // "C2S\0"
     let DirS2C = [| 0x53uy; 0x32uy; 0x43uy; 0x00uy |] // "S2C\0"
 
-    /// Derive 32-byte master key from password using PBKDF2-HMAC-SHA256 (100k iterations)
+    /// Derive 32-byte master key from password using Argon2id (m = 64 MiB, t = 3, p = 1)
     let deriveMasterKey (password: string) : byte[] =
         let pwdBytes = Encoding.UTF8.GetBytes(password)
-        Rfc2898DeriveBytes.Pbkdf2(pwdBytes, MasterDomainSalt, 100_000, HashAlgorithmName.SHA256, 32)
+        use argon2 = new Argon2id(pwdBytes)
+        argon2.Salt <- MasterDomainSalt
+        argon2.DegreeOfParallelism <- 1
+        argon2.Iterations <- 3
+        argon2.MemorySize <- 65536 // 64 MiB in KiB
+        argon2.GetBytes(32)
 
     /// 32-byte connection preamble: 24-byte random salt + 8-byte Unix timestamp ms (BE)
     [<Struct>]
@@ -84,22 +90,33 @@ module Crypto =
         BinaryPrimitives.WriteUInt64BigEndian(Span<byte>(nonce, 4, 8), seq)
         nonce
 
+    /// Compute specification AAD: For chunk 0: Preamble (32B) || PlaintextLen (3B BE); For chunk >0: PlaintextLen (3B BE)
+    let makeAad (preambleBytes: byte[]) (seq: uint64) (lenBytes: byte[]) : byte[] =
+        if seq = 0UL then
+            let aad = Array.zeroCreate<byte> (32 + 3)
+            Array.Copy(preambleBytes, 0, aad, 0, 32)
+            Array.Copy(lenBytes, 0, aad, 32, 3)
+            aad
+        else
+            lenBytes
+
     /// Seal chunk: [PlaintextLen (3B BE)][Ciphertext][Poly1305 Tag (16B)]
-    let sealChunk (aead: ChaCha20Poly1305) (dir: byte[]) (seq: uint64) (aad: ReadOnlySpan<byte>) (plaintext: ReadOnlySpan<byte>) : byte[] =
+    let sealChunk (aead: ChaCha20Poly1305) (dir: byte[]) (seq: uint64) (preambleBytes: byte[]) (plaintext: ReadOnlySpan<byte>) : byte[] =
         let len = plaintext.Length
         if len > 65536 then invalidArg "plaintext" "Chunk exceeds 64 KiB"
+        let lenBytes = [| byte ((len >>> 16) &&& 0xFF); byte ((len >>> 8) &&& 0xFF); byte (len &&& 0xFF) |]
         let outBuf = Array.zeroCreate<byte> (3 + len + 16)
-        outBuf.[0] <- byte ((len >>> 16) &&& 0xFF)
-        outBuf.[1] <- byte ((len >>> 8) &&& 0xFF)
-        outBuf.[2] <- byte (len &&& 0xFF)
+        Array.Copy(lenBytes, 0, outBuf, 0, 3)
+
         let nonce = makeNonce dir seq
+        let aad = makeAad preambleBytes seq lenBytes
         let ctSpan = Span<byte>(outBuf, 3, len)
         let tagSpan = Span<byte>(outBuf, 3 + len, 16)
-        aead.Encrypt(ReadOnlySpan<byte>(nonce), plaintext, ctSpan, tagSpan, aad)
+        aead.Encrypt(ReadOnlySpan<byte>(nonce), plaintext, ctSpan, tagSpan, ReadOnlySpan<byte>(aad))
         outBuf
 
     /// Open chunk
-    let openChunk (aead: ChaCha20Poly1305) (dir: byte[]) (seq: uint64) (aad: ReadOnlySpan<byte>) (ciphertextWithTag: ReadOnlySpan<byte>) : Result<byte[], string> =
+    let openChunk (aead: ChaCha20Poly1305) (dir: byte[]) (seq: uint64) (preambleBytes: byte[]) (lenBytes: byte[]) (ciphertextWithTag: ReadOnlySpan<byte>) : Result<byte[], string> =
         if ciphertextWithTag.Length < 16 then
             Error "Ciphertext too short for AEAD tag"
         else
@@ -107,9 +124,10 @@ module Crypto =
             let ct = ciphertextWithTag.Slice(0, ptLen)
             let tag = ciphertextWithTag.Slice(ptLen, 16)
             let nonce = makeNonce dir seq
+            let aad = makeAad preambleBytes seq lenBytes
             let plaintext = Array.zeroCreate<byte> ptLen
             try
-                aead.Decrypt(ReadOnlySpan<byte>(nonce), ct, tag, Span<byte>(plaintext), aad)
+                aead.Decrypt(ReadOnlySpan<byte>(nonce), ct, tag, Span<byte>(plaintext), ReadOnlySpan<byte>(aad))
                 Ok plaintext
             with _ ->
                 Error "AEAD tag verification failed"
