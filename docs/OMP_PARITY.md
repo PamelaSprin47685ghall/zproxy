@@ -71,6 +71,19 @@ Google 的 `CONTINUATION` 属于协议控制，需要服务端凭据继续请求
 
 仅接受 OpenAI `/v1/chat/completions` 和 `/v1/completions`。不对外提供 Anthropic Messages、Responses、模型管理或任意目标代理接口。
 
+因此，OMP 内置目录里以 `openai-responses` 提供的模型必须在本机客户端改用 chat 形态，否则请求会落到 `/v1/responses` 并得到 404。受影响的是 `xai-oauth`（`api.x.ai` 的对话模型）和 `openai` 等 provider。这些模型的上游同时提供 chat 端点，用同一条凭据实测均返回 200，所以 `models.yml` 只需为对话模型加模型级覆盖：
+
+```yaml
+providers:
+  xai-oauth:
+    baseUrl: http://127.0.0.1:18080/v1
+    modelOverrides:
+      grok-4.7:
+        api: openai-completions
+```
+
+`modelOverrides.<model>.api` 只影响该模型的 wire 形态，不动 OMP 的目录发现与凭据。语音与图像模型（`grok-tts`、`grok-imagine-image`）不属于补全端点，不要一并覆盖。
+
 普通 OMP 路径的 Chat streaming 与非 streaming 使用官方 OpenAI 编码器，保留文本、reasoning、工具调用和参数、Google thought signature、finish reason、错误和 usage。选配 AG 路径使用 Antigravity2API 的输出规则和 OpenAI 字段映射，账户和共享路由仍留在 OMP；具体差别见 [AG2API.md](AG2API.md)。非 streaming 请求仍可在远端请求原始 SSE，由本地汇总最终 JSON。
 
 旧 `/v1/completions` 接受一个文本 prompt，或只含一个文本的数组，`n` 为 1。它经官方 Chat 请求/响应适配后输出 `text_completion`。批量 prompt、token ID prompt、`echo`、`suffix`、`logprobs`、`best_of > 1` 和 `n > 1` 不做不可靠模拟，明确拒绝。只提供 Chat 的上游不天然具有旧文本补全接口的所有能力。[入口与限制](../plugins/omp/contract.mjs)
