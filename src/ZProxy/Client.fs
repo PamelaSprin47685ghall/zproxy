@@ -162,7 +162,14 @@ module Client =
             return! Plugins.decode decoders request reply token
         }
         let handler = Plugins.compose plugins send
-        let builder = WebApplication.CreateSlimBuilder([||])
+        // The host must not depend on the process working directory: a service
+        // manager may start the client with any cwd, and a root-owned directory
+        // such as "/" makes the default content-root probe fail so the listener
+        // never starts while the process stays alive. The binary's own directory
+        // is stable for both a published single file and a framework build.
+        let builder =
+            WebApplication.CreateSlimBuilder(
+                WebApplicationOptions(ContentRootPath = AppContext.BaseDirectory, Args = [||]))
         builder.Logging.ClearProviders() |> ignore
         builder.WebHost.ConfigureKestrel(fun server ->
             server.AddServerHeader <- false

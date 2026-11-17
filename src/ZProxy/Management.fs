@@ -362,7 +362,12 @@ window.addEventListener('pagehide',clearSecret);act(loadUsers);
         if String.IsNullOrWhiteSpace(masterPassword) || Encoding.UTF8.GetByteCount(masterPassword) > 1024 then
             invalidArg "masterPassword" "The master password must contain 1 to 1024 UTF-8 bytes."
         use sessions = new Sessions(masterPassword)
-        let builder = WebApplication.CreateSlimBuilder([||])
+        // Same rule as the client listener: the host never depends on the process
+        // working directory, which a service manager may set to a directory the
+        // default content-root probe cannot use.
+        let builder =
+            WebApplication.CreateSlimBuilder(
+                WebApplicationOptions(ContentRootPath = AppContext.BaseDirectory, Args = [||]))
         builder.Logging.ClearProviders() |> ignore
         builder.WebHost.ConfigureKestrel(fun server ->
             server.AddServerHeader <- false
