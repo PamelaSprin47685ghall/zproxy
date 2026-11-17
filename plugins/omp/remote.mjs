@@ -169,35 +169,32 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
       observeTurn: model => routing?.observeTurn?.(model) ?? {}, usesCustomTransport: model => features.usesCustomTransport(model) });
     let antigravity;
     if (config.antigravity2api) {
-      const { createAntigravity } = await import("./remote-antigravity.mjs");
-      agWorker = suppliedAgWorker ?? createAgWorker({ onExit: onWorkerExit });
-      antigravity = createAntigravity({ config, storage, registry, resolveModel, fetch: testFetch,
-        prepare: (value, options) => agWorker.prepare(value, options),
+      const [{ createAntigravity }, { createAgDeviceProfiles }] = await Promise.all([
+        import("./remote-antigravity.mjs"), import("./remote-ag-devices.mjs"),
+      ]);
+      // Only the remote worker owns official accounts, so only it receives a
+      // state directory; the local worker starts without one and cannot reach
+      // the official routes at all.
+      const stateDir = resolve(dirname(config.authDatabase), "antigravity");
+      agWorker = suppliedAgWorker ?? createAgWorker({ onExit: onWorkerExit, stateDir });
+      // One device profile per credential identity, derived once by the pinned
+      // official factory in the private child and kept in a private file.
+      const devices = createAgDeviceProfiles({
+        path: resolve(dirname(config.authDatabase), "ag-devices.json"),
+        // A worker that cannot derive a device fails that lookup; the store
+        // then reports it and no profile is invented in its place.
+        generate: email => {
+          if (typeof agWorker.device !== "function") throw new Error("The Antigravity device factory is unavailable.");
+          return agWorker.device(email);
+        },
+      });
+      antigravity = createAntigravity({ config, storage, registry, resolveModel, devices,
+        prepare: (value, options) => agWorker.officialPrepare(value, options),
+        send: (value, options) => agWorker.officialSend(value, options),
         observeTurn: model => routing?.observeTurn?.(model) ?? {} });
     }
-    // A retryable upstream rejection blocks that account in the official pool,
-    // then the same request is scheduled again so another account serves it.
-    const RETRYABLE_UPSTREAM = new Set([401, 403, 429]);
-    const FALLBACK_ATTEMPTS = 3;
-    const routeAntigravity = async (request, peer, scope) => {
-      for (let attempt = 0; attempt < FALLBACK_ATTEMPTS; attempt++) {
-        const response = await antigravity?.(request, scope);
-        if (response === undefined) return undefined;
-        if (response.ok || !RETRYABLE_UPSTREAM.has(response.status)) return response;
-        if (attempt + 1 === FALLBACK_ATTEMPTS) return response;
-        let model;
-        try { const body = await request.clone().json(); model = body?.model ? resolveModel(body.model) : undefined; } catch {}
-        const provider = model?.provider ?? 'google-antigravity';
-        const failure = Object.assign(new Error('The upstream rejected this account: ' + response.status), { status: response.status });
-        try {
-          const session = scope.credentialSessionId(provider, String(model?.id ?? ''));
-          await storage.limits.rotate(provider, session, { error: failure, modelId: model?.id, signal: request.signal, waitForSibling: false });
-        } catch {}
-        try { await response.body?.cancel(); } catch {}
-      }
-    };
     const dispatch = (request, peer, scope) => features.dispatch(request, peer, scope,
-      async (request, peer, scope) => await routeAntigravity(request, peer, scope)
+      async (request, peer, scope) => await antigravity?.(request, scope)
         ?? await passthrough(request, scope) ?? gateway.route(request, peer, scope));
     if (routingFactory) routing = await routingFactory({ config, storage, registry, dispatch, resolveModel });
     else if (config.shimsConfig) {

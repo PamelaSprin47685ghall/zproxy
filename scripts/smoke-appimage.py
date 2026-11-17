@@ -28,18 +28,23 @@ def main():
         plugin = appdir / "usr/lib/zproxy/omp"
         commands = working / "commands"
         commands.mkdir()
-        # AppRun needs dirname. No host Bun, dotnet, or Go command is available.
-        (commands / "dirname").symlink_to(Path(shutil.which("dirname")).resolve())
+        # AppRun and the isolated AG fixture need these host tools. No host
+        # Bun, dotnet, or Go command is available to the extracted bundle.
+        for name in ("dirname", "unshare", "true", "ip", "mount", "openssl"):
+            executable = shutil.which(name) or shutil.which(name, path="/usr/sbin:/sbin")
+            if not executable:
+                raise RuntimeError(f"The extracted AppImage smoke requires {name}.")
+            (commands / name).symlink_to(Path(executable).resolve())
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("DOTNET_", "ZPROXY_", "BUN_", "PI_"))
                        and key not in ("APPDIR", "LD_LIBRARY_PATH", "NODE_PATH")}
         environment.update({
             "PATH": str(commands),
             "PI_CODING_AGENT_DIR": str(working / "empty-omp-config"),
-            "LD_LIBRARY_PATH": str(appdir / "usr/lib/zproxy/lib"),
         })
+        bundle_environment = {**environment, "LD_LIBRARY_PATH": str(appdir / "usr/lib/zproxy/lib")}
         run([launcher, "--help"], env=environment, stdout=subprocess.DEVNULL, timeout=15)
-        version = subprocess.check_output([str(bun), "--version"], env=environment, text=True, timeout=15).strip()
+        version = subprocess.check_output([str(bun), "--version"], env=bundle_environment, text=True, timeout=15).strip()
         if version != lock["bun"]["version"]:
             raise RuntimeError("The extracted Bun version does not match the lock.")
         manifest = json.loads((appdir / "usr/share/zproxy/bundle.json").read_text())
@@ -59,9 +64,9 @@ def main():
              'await import("@oh-my-pi/pi-ai/providers/openai-chat-server"); '
              'if (typeof ModelRegistry !== "function" || typeof LazyRouter !== "function") '
              'throw new Error("OMP import failed"); process.exit(0);'],
-            cwd=plugin, env=environment, timeout=30)
+            cwd=plugin, env=bundle_environment, timeout=30)
         run([bun, plugin / "vendor/omp/packages/coding-agent/src/cli.ts", "--help"],
-            cwd=plugin, env=environment, stdout=subprocess.DEVNULL, timeout=30)
+            cwd=plugin, env=bundle_environment, stdout=subprocess.DEVNULL, timeout=30)
         run([sys.executable, ROOT / "scripts/smoke-native.py", "--binary", launcher], env=environment, timeout=90)
         run([sys.executable, ROOT / "scripts/smoke-omp.py", "--binary", launcher, "--omp-dir", plugin],
             env=environment, timeout=150)

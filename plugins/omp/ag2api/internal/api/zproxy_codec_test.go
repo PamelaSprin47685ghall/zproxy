@@ -299,3 +299,159 @@ func TestZProxyPromptRejectionKeepsItsHTTPStatusBeforeAnyContent(t *testing.T) {
 		t.Fatalf("%d %s", result.Code, result.Body.String())
 	}
 }
+
+// zproxyRecordingWriter records one upstream payload per write, with its time.
+type zproxyRecordingWriter struct {
+	*httptest.ResponseRecorder
+	mu      sync.Mutex
+	payload [][]byte
+	written []time.Time
+}
+
+func (writer *zproxyRecordingWriter) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	writer.payload = append(writer.payload, append([]byte(nil), data...))
+	writer.written = append(writer.written, time.Now())
+	writer.mu.Unlock()
+	return writer.ResponseRecorder.Write(data)
+}
+
+func (writer *zproxyRecordingWriter) WriteString(data string) (int, error) {
+	return writer.Write([]byte(data))
+}
+
+func (writer *zproxyRecordingWriter) frames() ([][]byte, []time.Time) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return append([][]byte(nil), writer.payload...), append([]time.Time(nil), writer.written...)
+}
+
+// FlushError keeps the flushing path identical to the real writer. It uses the
+// recorder's own Flush so the test file needs no extra import.
+func (writer *zproxyRecordingWriter) FlushError() error {
+	writer.ResponseRecorder.Flush()
+	return nil
+}
+
+// zproxyCheckFrames requires every payload to be one whole SSE frame: either
+// the exact comment, or one data value, and never a split event.
+func zproxyCheckFrames(t *testing.T, frames [][]byte) {
+	t.Helper()
+	for index, frame := range frames {
+		text := string(frame)
+		if text == sseHeartbeat {
+			continue
+		}
+		if !strings.HasPrefix(text, "data: ") || !strings.HasSuffix(text, "\n\n") {
+			t.Fatalf("payload %d is not one whole event frame: %q", index, frame)
+		}
+		if data := text[len("data: "):len(text)-2]; data != "[DONE]" && !json.Valid([]byte(data)) {
+			t.Fatalf("payload %d is not one SSE data value: %q", index, frame)
+		}
+	}
+}
+
+
+// A heartbeat is one whole comment payload and is written only between whole
+// event payloads. A stopped stream writes nothing more.
+func TestZProxyStreamHeartbeatKeepsFramesWholeAndStops(t *testing.T) {
+	t.Parallel()
+	recorder := &zproxyRecordingWriter{ResponseRecorder: httptest.NewRecorder()}
+	// A one-hour timer keeps this unit test deterministic: the beat below is
+	// called by hand, so no scheduled beat can race the expected frame count.
+	stream := &streamKeepalive{ResponseWriter: recorder, frame: sseHeartbeat}
+	stream.mu.Lock()
+	stream.timer = time.AfterFunc(time.Hour, stream.beat)
+	stream.mu.Unlock()
+	if err := stream.open(); err != nil {
+		t.Fatal(err)
+	}
+	first := map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "first"}}}}
+	if err := writeSSE(stream, "", first); err != nil {
+		t.Fatal(err)
+	}
+	stream.beat()
+	if err := writeSSE(stream, "", map[string]any{"choices": []any{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSSEText(stream, "[DONE]"); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.stop() {
+		t.Fatal("the stream headers were not written before the stream ended")
+	}
+	frames, _ := recorder.frames()
+	zproxyCheckFrames(t, frames)
+	if len(frames) != 4 {
+		t.Fatalf("the stream wrote %d payloads instead of four whole frames", len(frames))
+	}
+	if string(frames[1]) != sseHeartbeat {
+		t.Fatalf("the heartbeat is not one whole comment frame: %q", frames[1])
+	}
+	if tail := string(frames[3]); tail != "data: [DONE]\n\n" {
+		t.Fatalf("the terminal marker moved: %q", tail)
+	}
+	stream.beat()
+	if after, _ := recorder.frames(); len(after) != len(frames) {
+		t.Fatalf("a stopped stream wrote %d more payloads", len(after)-len(frames))
+	}
+}
+
+// The stream stays silent for one whole heartbeat interval. The comment must
+// cover that silence, land between whole frames, and leave the model output
+// unchanged.
+func TestZProxyStreamHeartbeatCoversOneIdleInterval(t *testing.T) {
+	t.Parallel()
+	reader, writer := io.Pipe()
+	go func() {
+		defer writer.Close()
+		if _, err := io.WriteString(writer, zproxyFrame(`[{"text":"first"}]`)); err != nil {
+			return
+		}
+		time.Sleep(streamHeartbeatInterval + 2*time.Second)
+		_, _ = io.WriteString(writer, zproxyEnd())
+	}()
+	recorder := &zproxyRecordingWriter{ResponseRecorder: httptest.NewRecorder()}
+	request := httptest.NewRequest("POST", "http://private/decode", nil)
+	ZProxyDecode(recorder, request, "/v1/chat/completions",
+		[]byte(`{"model":"friendly","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+		zproxyTestModel("google"), reader, false, nil)
+	frames, times := recorder.frames()
+	zproxyCheckFrames(t, frames)
+	answer, beat, done := -1, -1, -1
+	for index, frame := range frames {
+		text := string(frame)
+		switch {
+		case answer < 0 && strings.Contains(text, `"content":"first"`):
+			answer = index
+		case beat < 0 && text == sseHeartbeat:
+			beat = index
+		case done < 0 && text == "data: [DONE]\n\n":
+			done = index
+		}
+	}
+	// The answer chunk is written, then the upstream stays silent for one whole
+	// interval. The comment must cover that silence and precede [DONE].
+	if answer < 0 || beat < 0 || done < 0 || answer > beat || beat > done {
+		t.Fatalf("the idle interval was not covered between whole frames: %q", frames)
+	}
+	if gap := times[beat].Sub(times[answer]); gap < streamHeartbeatInterval/2 {
+		t.Fatalf("the heartbeat arrived after only %s of silence", gap)
+	}
+}
+
+// A non-stream answer never enters the streaming writer. It stays one JSON
+// object, with no stream header, comment, or event frame.
+func TestZProxyNonStreamOutputNeverWritesAHeartbeat(t *testing.T) {
+	t.Parallel()
+	response := zproxyDecodeFixture(t, `{"model":"friendly","messages":[{"role":"user","content":"hi"}]}`,
+		zproxyFrame(`[{"text":"settled"}]`)+zproxyEnd(), "google", "/v1/chat/completions", false, nil)
+	body := response.Body.String()
+	if response.Code != 200 || strings.Contains(body, sseHeartbeat) || strings.Contains(body, "data: ") {
+		t.Fatalf("a non-stream response carried stream bytes: %d %q", response.Code, body)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &object); err != nil || object["object"] != "chat.completion" {
+		t.Fatalf("a non-stream response is not one JSON object: %v %q", err, body)
+	}
+}

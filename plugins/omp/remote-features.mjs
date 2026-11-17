@@ -11,6 +11,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { loadConfig } from "./vendor/shims/lib/config.mjs";
+import { report } from "./vendor/shims/lib/contracts.mjs";
 import { CredentialRepository } from "./vendor/shims/lib/credentials.mjs";
 import { installVendorPlugin, loadVendorShim, registerExtensionProviderMeta } from "./vendor/shims/lib/host-bridge.mjs";
 import { discoverPlugins, createPluginHost } from "./vendor/shims/features/plugin-bridge.mjs";
@@ -22,6 +23,9 @@ import { descriptorFor } from "./contract.mjs";
 const infoByResponse = new WeakMap();
 const MAX_NEGOTIATION_BYTES = 65536;
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
+const DEFAULT_PLUGIN_DEADLINE_MS = 15_000;
+/** Marker returned by withDeadline when the deadline elapsed first. */
+const PLUGIN_DEADLINE = Symbol.for("zproxy.plugin-deadline");
 const encoder = new TextEncoder();
 
 export function getWireInfo(response) { return infoByResponse.get(response); }
@@ -44,35 +48,151 @@ async function boundedJson(response, limit) {
   return JSON.parse(Buffer.concat(parts, size).toString("utf8"));
 }
 
+/** One diagnostic message. It never carries a credential value. */
+function errorMessage(error) {
+  if (error instanceof TypeError) return "TypeError";
+  if (error instanceof SyntaxError) return "SyntaxError";
+  return "Error";
+}
+
+/**
+ * Run one asynchronous step with a hard deadline.
+ *
+ * Reaching the deadline is not an error: the caller keeps whatever the step
+ * already produced and continues. The late step still settles on its own, so
+ * its caller must attach a rejection handler before racing it.
+ */
+async function withDeadline(task, timeoutMs) {
+  let timer;
+  const timeout = new Promise(resolveTimeout => {
+    timer = setTimeout(() => resolveTimeout(PLUGIN_DEADLINE), timeoutMs);
+    timer.unref?.();
+  });
+  try { return await Promise.race([task, timeout]); }
+  finally { clearTimeout(timer); }
+}
+
 function validToken(value) {
   return typeof value === "string" && value.trim() !== "" && value.trim() !== "undefined";
 }
 
-/** Read the external CLI store, then write through the current OMP public API. */
-export async function syncKiro(storage, path) {
-  let database;
+/** One synchronization outcome: did a write land, and must a missed write be retried? */
+const KIRO_IDLE = Object.freeze({ synced: false, retry: false });
+const KIRO_SYNCED = Object.freeze({ synced: true, retry: false });
+const KIRO_RETRY = Object.freeze({ synced: false, retry: true });
+const KIRO_FIELDS = ["access", "refresh", "expires", "region", "profileArn"];
+
+/** Read the kiro-cli social token, or undefined when it is absent or unusable. */
+function readKiroToken(database) {
+  const row = database.query("SELECT value FROM auth_kv WHERE key = 'kirocli:social:token'").get();
+  if (!row || typeof row.value !== "string" || Buffer.byteLength(row.value) > MAX_NEGOTIATION_BYTES) return undefined;
   let token;
+  try { token = JSON.parse(row.value); } catch { return undefined; }
+  if (!token || typeof token !== "object") return undefined;
+  return validToken(token.access_token) && validToken(token.refresh_token) ? token : undefined;
+}
+
+/**
+ * Read the CLI token from its own database.
+ *
+ * The source belongs to kiro-cli, not to this process: a missing, locked, or
+ * corrupt file is a condition to skip, never an error to raise into the poll.
+ * Closing the handle cannot fail the read, so a close error is dropped too.
+ */
+function readKiroSource(path) {
+  let database;
   try {
     database = new Database(path, { readonly: true, create: false });
-    const row = database.query("SELECT value FROM auth_kv WHERE key = 'kirocli:social:token'").get();
-    if (!row || typeof row.value !== "string" || Buffer.byteLength(row.value) > MAX_NEGOTIATION_BYTES) return false;
-    token = JSON.parse(row.value);
-  } finally { database?.close(); }
-  if (!token || !validToken(token.access_token) || !validToken(token.refresh_token)) return false;
-  const rows = storage.credentials.list("kiro").filter(row => !row.disabledCause && row.credential.type === "oauth");
-  const row = rows.length === 1 ? rows[0] : rows.find(item =>
-    typeof token.profile_arn === "string" && token.profile_arn === item.credential.profileArn);
-  if (!row) return false;
+    return readKiroToken(database);
+  } catch { return undefined; }
+  finally { try { database?.close(); } catch {} }
+}
+
+/** The non-empty profile ARN, or undefined. The CLI token and a row share only this. */
+function kiroProfileArn(value) {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+/**
+ * The deadline to store when the CLI token carries no usable `expires_at`.
+ *
+ * A fresh `Date.now()` on every poll would rewrite the row forever, because the
+ * change stamp compares stored deadlines. Reusing a deadline that is still
+ * ahead keeps the sync idempotent, and one hour from now is used only after the
+ * stored one has already passed.
+ */
+function kiroFallbackExpiry(stored) {
+  const deadline = Number(stored);
+  return Number.isFinite(deadline) && deadline > Date.now() ? deadline : Date.now() + 3600000;
+}
+
+/**
+ * Pick the single active kiro row the CLI token denotes, or undefined.
+ *
+ * The profile ARN decides whenever both sides carry one. Rows that the token
+ * cannot be told apart from are refused rather than guessed: writing a token
+ * onto the wrong account breaks that account, and skipping costs one poll.
+ */
+function matchKiroRow(rows, token) {
+  // One account needs no profile to be identified; the conflict check below
+  // still refuses it when both sides name a different profile.
+  if (rows.length === 1) return rows[0];
+  const profile = kiroProfileArn(token.profile_arn);
+  if (!profile) return undefined;
+  const matching = rows.filter(row => kiroProfileArn(row.credential.profileArn) === profile);
+  return matching.length === 1 ? matching[0] : undefined;
+}
+
+/**
+ * Write the token onto the matched row, and never add an account.
+ *
+ * The official `upsert` cannot carry this write. It inserts a new row whenever
+ * `matchesReplacementCredential` refuses the replacement, and that function
+ * refuses outright when the incoming credential resolves no identity key. A
+ * kiro row can carry no account, email, project, or org field, so its key is
+ * null and an upsert would leave the real account alone and add a clone beside
+ * it. The matched row is the identity, so the write addresses it by id.
+ *
+ * A host without a by-id write cannot persist the update. It reports idle
+ * instead of retrying forever; it never falls back to the inserting upsert.
+ */
+async function writeKiro(storage, row, next) {
+  const replace = storage.credentials.replaceById;
+  if (typeof replace !== "function") return KIRO_IDLE;
+  try {
+    if ((await replace.call(storage.credentials, "kiro", row.id, next)) === -1) return KIRO_RETRY;
+    // A lost compare-and-set can return the existing row index without writing.
+    const saved = storage.credentials.list("kiro").find(item => item.id === row.id && !item.disabledCause);
+    return saved && KIRO_FIELDS.every(key => saved.credential?.[key] === next[key]) ? KIRO_SYNCED : KIRO_RETRY;
+  } catch { return KIRO_RETRY; }
+}
+
+/**
+ * Copy the kiro-cli token onto the row that already holds that account.
+ *
+ * Returns `{ synced, retry }`. `retry` marks a write that did not land, so the
+ * caller keeps its change stamp and tries again. No token value is returned,
+ * logged, or thrown, so a failure cannot leak the secret.
+ */
+export async function syncKiro(storage, path) {
+  const token = readKiroSource(path);
+  if (!token) return KIRO_IDLE;
+  const rows = storage.credentials.list("kiro").filter(row => !row.disabledCause && row.credential?.type === "oauth");
+  const row = matchKiroRow(rows, token);
+  if (!row) return KIRO_IDLE;
   const current = row.credential;
-  if (token.profile_arn && current.profileArn && token.profile_arn !== current.profileArn) return false;
+  const profile = kiroProfileArn(token.profile_arn);
+  // A lone row is still the wrong account when both sides name a different
+  // profile: the CLI token belongs to another kiro account, so skip this poll.
+  const stored = kiroProfileArn(current.profileArn);
+  if (profile && stored && profile !== stored) return KIRO_IDLE;
   const expiry = typeof token.expires_at === "string" ? Date.parse(token.expires_at) : NaN;
   const next = { ...current, access: token.access_token, refresh: `${token.refresh_token}|desktop`,
-    expires: Number.isFinite(expiry) ? expiry : Date.now() + 3600000,
+    expires: Number.isFinite(expiry) ? expiry : kiroFallbackExpiry(current.expires),
     region: typeof token.region === "string" && token.region ? token.region : current.region ?? "us-east-1",
-    profileArn: typeof token.profile_arn === "string" && token.profile_arn ? token.profile_arn : current.profileArn };
-  if (["access", "refresh", "expires", "region", "profileArn"].every(key => current[key] === next[key])) return false;
-  await storage.credentials.upsert("kiro", next);
-  return true;
+    profileArn: profile ?? current.profileArn };
+  if (KIRO_FIELDS.every(key => current[key] === next[key])) return KIRO_IDLE;
+  return writeKiro(storage, row, next);
 }
 
 /** Ask the official request builder for the selected protocol without sending it. */
@@ -118,6 +238,8 @@ export async function createRemoteFeatures({ config, storage, registry, fetch: b
   const repository = new CredentialRepository({ agentDbPath: config.authDatabase });
   let stopped = false;
   let closed = false;
+  /** Set once eager plugin initialization exceeded its deadline. */
+  let pluginDeadlinePassed = false;
   let kiroBusy;
   let lastKiroStamp;
   let kiroTimer;
@@ -129,15 +251,39 @@ export async function createRemoteFeatures({ config, storage, registry, fetch: b
     let source;
     try { source = await stat(kiroPath); } catch (error) { if (error.code === "ENOENT") return; throw error; }
     const wal = await stat(kiroPath + "-wal").catch(() => undefined);
-    const accounts = storage.credentials.list("kiro").map(row => [row.id, row.disabledCause, row.credential.expires, row.credential.profileArn]);
+    const accounts = storage.credentials.list("kiro").map(row => [row.id, row.disabledCause, row.credential?.expires, row.credential?.profileArn]);
     const stamp = [source.mtimeMs, source.size, wal?.mtimeMs, wal?.size, JSON.stringify(accounts)].join(":");
     if (stamp === lastKiroStamp) return;
-    await syncKiro(storage, kiroPath);
-    lastKiroStamp = stamp;
+    const result = await syncKiro(storage, kiroPath);
+    // A write that did not land keeps the old stamp, so the next poll retries it.
+    if (!result.retry) lastKiroStamp = stamp;
   })().finally(() => { kiroBusy = undefined; });
 
+  /** Run one disposer, report its failure, and never interrupt the caller. */
+  const runDisposer = async (dispose, name) => {
+    try { await dispose(); } catch (error) { report(`plugin-bridge: ${name} disposer failed`, { error: errorMessage(error) }); }
+  };
+
+  /** Remove every registered provider together with its extension metadata. */
+  const releaseProviders = () => {
+    for (const [id, entry] of providers) {
+      try { entry.dispose(); } catch (error) { report(`plugin-bridge: ${id} metadata dispose failed`, { error: errorMessage(error) }); }
+      try { registry.unregisterProvider(id); } catch (error) { report(`plugin-bridge: unregisterProvider(${id}) failed`, { error: errorMessage(error) }); }
+    }
+    providers.clear();
+  };
+
   const register = (id, supplied, packageName, shim) => {
-    if (stopped) return;
+    if (stopped) {
+      report(`plugin-bridge: ${packageName} registered ${id} after close; discarded`);
+      return;
+    }
+    // A plugin that outlived the deadline may still try to register. Its
+    // provider was never advertised, so the registry must not learn about it.
+    if (pluginDeadlinePassed) {
+      report(`plugin-bridge: ${packageName} registered ${id} after the initialization deadline; discarded`);
+      return;
+    }
     const value = { ...supplied };
     if (value.oauth === true) delete value.oauth;
     if (value.models?.length === 1 && (registry.getProviderModels?.(id)?.length ?? 0) > 1) delete value.models;
@@ -172,27 +318,59 @@ export async function createRemoteFeatures({ config, storage, registry, fetch: b
         const load = (async () => {
           for (const plugin of advertised) {
             for (const entry of plugin.entries) {
-              if (stopped) return;
-              const module = await import(entry);
-              const initialize = module.default ?? module;
-              if (typeof initialize !== "function") throw new Error("The provider plugin has no initializer.");
+              if (stopped || pluginDeadlinePassed) return;
+              let initialize;
+              try {
+                const module = await import(entry);
+                initialize = module.default ?? module;
+              } catch (error) {
+                report(`plugin-bridge: cannot import ${entry}`, { error: errorMessage(error) });
+                continue;
+              }
+              if (typeof initialize !== "function") {
+                report(`plugin-bridge: ${entry} has no initializer`);
+                continue;
+              }
               const host = createPluginHost((id, value) => register(id, value, plugin.name, shim), {
-                onUnregister(id) { if (!stopped) { providers.get(id)?.dispose(); providers.delete(id); registry.unregisterProvider(id); } },
+                onUnregister(id) {
+                  if (stopped) return;
+                  // A discarded late registration never reached the registry,
+                  // so an id that is not ours here has nothing to remove.
+                  const entry = providers.get(id);
+                  if (!entry) return;
+                  entry.dispose();
+                  providers.delete(id);
+                  registry.unregisterProvider(id);
+                },
               });
-              const dispose = await initialize(host);
+              let dispose;
+              try {
+                dispose = await initialize(host);
+              } catch (error) {
+                report(`plugin-bridge: ${plugin.name} threw during init`, { error: errorMessage(error) });
+                continue;
+              }
               if (typeof dispose === "function") {
-                if (stopped) await dispose();
+                // A disposer that arrives after the deadline or after close has
+                // no live registration left to guard, so it runs at once.
+                if (stopped || pluginDeadlinePassed) await runDisposer(dispose, plugin.name);
                 else disposers.push(dispose);
               }
             }
           }
         })();
-        let timeout;
-        try {
-          await Promise.race([load, new Promise((_, reject) => {
-            timeout = setTimeout(() => { stopped = true; reject(new Error("Provider plugin initialization timed out.")); }, plugins.eagerTimeoutMs);
-          })]);
-        } finally { clearTimeout(timeout); }
+        // The late load still settles on its own, so its failure needs a
+        // handler before the deadline races it.
+        const settled = load.catch(error => {
+          report("plugin-bridge: plugin initialization failed", { error: errorMessage(error) });
+        });
+        const deadline = Number.isFinite(plugins.eagerTimeoutMs) && plugins.eagerTimeoutMs > 0
+          ? plugins.eagerTimeoutMs
+          : DEFAULT_PLUGIN_DEADLINE_MS;
+        if (await withDeadline(settled, deadline) === PLUGIN_DEADLINE) {
+          pluginDeadlinePassed = true;
+          report(`plugin-bridge: plugin initialization exceeded ${deadline}ms; discarding later registrations`);
+        }
       }
     }
     await refreshKiro().catch(() => process.stderr.write("The external Kiro credential could not be synchronized.\n"));
@@ -203,8 +381,8 @@ export async function createRemoteFeatures({ config, storage, registry, fetch: b
   } catch (error) {
     stopped = true;
     clearInterval(kiroTimer);
-    for (const dispose of disposers.reverse()) await dispose();
-    for (const [id, entry] of providers) { entry.dispose(); registry.unregisterProvider(id); }
+    for (const dispose of disposers.reverse()) await runDisposer(dispose, "plugin-bridge");
+    releaseProviders();
     repository.close();
     throw error;
   }
@@ -297,10 +475,13 @@ export async function createRemoteFeatures({ config, storage, registry, fetch: b
       stopped = true;
       clearInterval(kiroTimer);
       await kiroBusy;
-      for (const dispose of disposers.reverse()) await dispose();
-      for (const [id, entry] of providers) { entry.dispose(); registry.unregisterProvider(id); }
-      providers.clear();
+      for (const dispose of disposers.reverse()) await runDisposer(dispose, "plugin-bridge");
+      releaseProviders();
       repository.close();
     },
   };
 }
+
+
+
+

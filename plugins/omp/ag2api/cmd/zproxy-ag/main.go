@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 	"github.com/Mag1cFall/Antigravity2API/internal/api"
 	"github.com/Mag1cFall/Antigravity2API/internal/service"
 )
@@ -90,7 +92,10 @@ func (w *chunkedWriter) Write(data []byte) (int, error) {
 
 type worker struct {
 	cache *api.ZProxyCache
-	stop  func()
+	// official is the remote account runtime. It is nil in a local worker,
+	// which owns no account and must refuse the official routes.
+	official *officialRuntime
+	stop     func()
 }
 
 func jsonReply(w http.ResponseWriter, status int, value any) {
@@ -139,6 +144,38 @@ func (worker *worker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if worker.stop != nil {
 			go worker.stop()
 		}
+	case "POST /device":
+		var input struct {
+			Version int    `json:"version"`
+			Email   string `json:"email"`
+		}
+		if err := readJSON(r.Body, 1024, &input); err != nil {
+			problem(w, 400, err)
+			return
+		}
+		local, domain, found := strings.Cut(input.Email, "@")
+		if input.Version != 1 || !plain(input.Email, 320) || !found || local == "" || domain == "" || strings.Contains(domain, "@") {
+			problem(w, 400, errors.New("invalid device identity"))
+			return
+		}
+		device := antigravity.NewDevice(input.Email)
+		jsonReply(w, 200, map[string]any{"device": device, "userAgent": device.UserAgent()})
+	case "POST /agent":
+		var input struct {
+			Version int    `json:"version"`
+			OS      string `json:"os"`
+			Arch    string `json:"arch"`
+		}
+		if err := readJSON(r.Body, 1024, &input); err != nil {
+			problem(w, 400, err)
+			return
+		}
+		if input.Version != 1 || !plain(input.OS, 64) || !plain(input.Arch, 64) {
+			problem(w, 400, errors.New("invalid device platform"))
+			return
+		}
+		device := antigravity.Device{OS: input.OS, Arch: input.Arch}
+		jsonReply(w, 200, map[string]any{"userAgent": device.UserAgent()})
 	case "POST /prepare":
 		var input prepareInput
 		if err := readJSON(r.Body, maxRequest+(64<<10), &input); err != nil {
@@ -154,7 +191,8 @@ func (worker *worker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			problem(w, 400, err)
 			return
 		}
-		jsonReply(w, 200, map[string]any{"body": body})
+		device := antigravity.Device{OS: runtime.GOOS, Arch: runtime.GOARCH}
+		jsonReply(w, 200, map[string]any{"body": body, "userAgent": device.UserAgent()})
 	case "POST /augment":
 		data, err := io.ReadAll(io.LimitReader(r.Body, maxRequest+1))
 		if err != nil || len(data) > maxRequest || !utf8.Valid(data) {
@@ -174,6 +212,18 @@ func (worker *worker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(augmented)
 	case "POST /decode":
 		worker.decode(w, r)
+	case "POST /official-prepare":
+		if worker.official == nil {
+			problem(w, 404, errors.New("unknown private route"))
+			return
+		}
+		worker.officialPrepare(w, r)
+	case "POST /official-send":
+		if worker.official == nil {
+			problem(w, 404, errors.New("unknown private route"))
+			return
+		}
+		worker.officialSend(w, r)
 	default:
 		problem(w, 404, errors.New("unknown private route"))
 	}
@@ -309,9 +359,23 @@ func (worker *worker) decode(w http.ResponseWriter, r *http.Request) {
 	api.ZProxyDecode(w, r.WithContext(ctx), envelope.Path, original, model, source, reasoningOrder == "1", worker.cache)
 }
 
-func run(socket string) error {
+// run serves the private IPC socket. A non-empty stateDir enables the remote
+// official account endpoints and holds every account's Hub and session state;
+// an empty one leaves the worker local, so the official routes do not exist.
+func run(socket, stateDir string) error {
 	if !filepath.IsAbs(socket) {
 		return errors.New("the socket path must be absolute")
+	}
+	var official *officialRuntime
+	if stateDir != "" {
+		opened, err := newOfficialRuntime(stateDir)
+		if err != nil {
+			return err
+		}
+		official = opened
+	}
+	if official != nil {
+		defer official.Close()
 	}
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
@@ -334,9 +398,12 @@ func run(socket string) error {
 			defer done()
 			_ = server.Shutdown(deadline)
 			_ = server.Close()
+			if official != nil {
+				_ = official.Close()
+			}
 		})
 	}
-	server.Handler = &worker{cache: api.NewZProxyCache(), stop: stop}
+	server.Handler = &worker{cache: api.NewZProxyCache(), official: official, stop: stop}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
@@ -360,12 +427,32 @@ func main() {
 		fmt.Println("zproxy-ag Antigravity2API " + upstreamVersion)
 		return
 	}
-	if len(os.Args) != 3 || os.Args[1] != "--socket" {
-		fmt.Fprintln(os.Stderr, "Usage: zproxy-ag --socket ABSOLUTE_PATH")
+	socket, stateDir, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Usage: zproxy-ag --socket ABSOLUTE_PATH [--state-dir ABSOLUTE_PATH]")
 		os.Exit(2)
 	}
-	if err := run(os.Args[2]); err != nil {
+	if err := run(socket, stateDir); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+// parseArgs accepts only the two documented shapes. The remote process adds
+// --state-dir and owns the official accounts; the local process passes only
+// --socket, so it can neither start nor reach an official account. Both paths
+// must be absolute, and no other argument is accepted.
+func parseArgs(args []string) (socket, stateDir string, err error) {
+	if len(args) < 2 || args[0] != "--socket" || !filepath.IsAbs(args[1]) {
+		return "", "", errors.New("invalid arguments")
+	}
+	socket = args[1]
+	switch {
+	case len(args) == 2:
+		return socket, "", nil
+	case len(args) == 4 && args[2] == "--state-dir" && filepath.IsAbs(args[3]):
+		return socket, args[3], nil
+	default:
+		return "", "", errors.New("invalid arguments")
 	}
 }

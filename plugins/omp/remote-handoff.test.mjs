@@ -223,3 +223,23 @@ describe("upstream that never yields a raw stream", () => {
     expect((await response.json()).error.type).toBe("upstream_error");
   });
 });
+
+test("terminal fallback preserves reasoning and tool calls for both response modes", async () => {
+  const terminal = { ...success, content: [
+    { type: "thinking", thinking: "considered" },
+    { type: "toolCall", id: "call-fixture", name: "lookup", arguments: { city: "Paris" } },
+  ], stopReason: "toolUse", usage: { input: 8, output: 5, cacheRead: 2, cacheWrite: 0, totalTokens: 15 } };
+  const buffered = await handoff()(terminalTurn(jsonOnly, terminal, false));
+  const json = await buffered.json();
+  expect(json.model).toBe("public-alias");
+  expect(json.choices[0].message.reasoning_content).toBe("considered");
+  expect(json.choices[0].message.tool_calls[0]).toMatchObject({ id: "call-fixture", type: "function", function: { name: "lookup", arguments: '{\"city\":\"Paris\"}' } });
+  expect(json.choices[0].finish_reason).toBe("tool_calls");
+  expect(json.usage.prompt_tokens).toBe(10);
+  const streamed = await handoff()(terminalTurn(jsonOnly, terminal, true));
+  const frames = (await streamed.text()).split('\n\n').filter(frame => frame.startsWith('data: ') && frame !== 'data: [DONE]').map(frame => JSON.parse(frame.slice(6)));
+  expect(frames.some(frame => frame.choices?.[0]?.delta?.reasoning_content === "considered")).toBe(true);
+  expect(frames.some(frame => frame.choices?.[0]?.delta?.tool_calls?.[0]?.id === "call-fixture")).toBe(true);
+  expect(frames.some(frame => frame.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments === '{\"city\":\"Paris\"}')).toBe(true);
+  expect(frames.some(frame => frame.choices?.[0]?.finish_reason === "tool_calls")).toBe(true);
+});

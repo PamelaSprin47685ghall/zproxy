@@ -198,6 +198,8 @@ server 与 client 命令分别在远端和本机执行，且沿用前文各自�
 
 如需原 omp-shims 的共享路由，在 `remote.json` 加入 `"shimsConfig": "./shims.json"`，指向现有 v2 配置。该配置启用 `lazy-router` 后，远端使用固定版本原源码中的策略、健康、亲和、并发、速度和状态存储组件；实际凭据操作接回当前官方 OMP。多个用户共享远端的路由信息，用户隧道身份仍各自独立。
 
+`rating` 节点按候选的能力先验、相对成本、实测延迟和前缀亲和性评分，并按配置温度探索；`features["lazy-router"].routing` 中的权重会传入评分。路由图中未设置 `intelligence` 或 `cost` 时使用上游默认值 50 和 1，不代表对模型能力或实际账单的测量。内置路由的候选使用这些相同默认值，因此仅改变能力或成本权重不会区分它们；需要区分时，应在路由图中配置候选值。
+
 `routesFile` 和日志路径按 `shims.json` 所在目录解析。`stateDbPath` 由原配置模块处理；建议使用明确的服务器私有绝对路径。`shimsConfig` 不是把所有旧猴子补丁无条件重新装上：已由官方功能接管的 shim 删除，必须保留的部分在对应边界实现。每项处理和限制见 [OMP_PARITY.md](docs/OMP_PARITY.md)。原路由事件日志属于远端私有诊断；公开 `/reports` 仍只显示昵称及聚合计数。
 
 ### Antigravity 使用 Go 协议适配

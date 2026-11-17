@@ -1,5 +1,21 @@
 // Retain OMP request shaping and auth. Transfer the successful body before its parser can read it.
 import { randomUUID } from "node:crypto";
+import { encodeResponse, encodeStream } from "@oh-my-pi/pi-ai/providers/openai-chat-server";
+
+async function* terminalEvents(message) {
+  for (let index = 0; index < message.content.length; index++) {
+    const part = message.content[index];
+    if (part.type === "text") yield { type: "text_delta", delta: part.text };
+    else if (part.type === "thinking") yield { type: "thinking_delta", delta: part.thinking };
+    else if (part.type === "redactedThinking") yield { type: "thinking_delta", delta: part.data };
+    else if (part.type === "toolCall") {
+      yield { type: "toolcall_start", contentIndex: index, partial: message };
+      yield { type: "toolcall_end", contentIndex: index, toolCall: part };
+    }
+  }
+  yield { type: "done", reason: message.stopReason, message };
+}
+
 
 const SAFE_HEADERS = ["content-type", "cache-control", "retry-after"];
 const RAW_PATHS = /(?:\/chat\/completions|\/responses|\/messages|:streamGenerateContent|:rawPredict)$/;
@@ -317,20 +333,17 @@ export function createRawHandoff({ descriptorFor, serializeRecipe, chooseFetch =
         await finish();
         const terminal = outcome.terminal;
         if (terminal && !terminal.error && terminal.stopReason !== "error" && terminal.stopReason !== "aborted" && Array.isArray(terminal.content)) {
-          const text = terminal.content.filter(part => part.type === "text").map(part => part.text).join("");
-          const model = turn.model.id;
-          const usage = { prompt_tokens: terminal.usage?.input ?? 0, completion_tokens: terminal.usage?.output ?? 0, total_tokens: terminal.usage?.totalTokens ?? 0 };
-          const id = "chatcmpl-" + randomUUID().replaceAll("-", "");
-          const created = Math.floor(Date.now() / 1000);
-          const finishReason = terminal.stopReason === "length" ? "length" : terminal.stopReason === "toolUse" ? "tool_calls" : "stop";
+          const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, ...terminal.usage };
+          const message = { ...terminal, usage };
+          priceUsage(turn.model, usage);
+          turn.observeUsage(usage);
+          observer.onUsage?.(usage);
           if (turn.parsed.stream) {
-            const frame = payload => "data: " + JSON.stringify(payload) + "\n\n";
-            const body = frame({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }] })
-              + frame({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage })
-              + "data: [DONE]\n\n";
-            return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+            return new Response(encodeStream(terminalEvents(message), turn.parsed.modelId, turn.parsed.options),
+              { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
           }
-          return Response.json({ id, object: "chat.completion", created, model, choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: finishReason }], usage }, { status: 200 });
+          return Response.json(encodeResponse(message, turn.parsed.modelId));
         }
         const { type = "upstream_error", ...init } = lastFailure ?? { status: 502 };
         return Response.json({ error: { type, message: "The upstream request failed before a response was transferred." } }, init);

@@ -91,6 +91,7 @@
     "patch-shims.mjs",
     "patch-upstream.mjs",
     "remote-accounts.mjs",
+    "remote-ag-devices.mjs",
     "remote-antigravity.mjs",
     "remote-features.mjs",
     "remote-google.mjs",

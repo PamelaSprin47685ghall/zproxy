@@ -102,14 +102,50 @@ function restoredEvent(event, mapping) {
   return copy;
 }
 
+const EVENT_RECORD_BYTES = 512;
+const TEXT_DELTA_COPIES = 2;
+const TOOL_DELTA_COPIES = 3;
+
+/**
+ * Retained bytes of one held event.
+ *
+ * Every held event points at the parser's single live `partial` message, so
+ * that snapshot is shared: charging it once per event would multiply one
+ * object by the pending count, and copying it would create the duplication
+ * this limit exists to bound. The snapshot itself therefore stays free, and
+ * only the bytes the event owns are charged.
+ *
+ * A streamed delta is still retained more than once. The parser keeps the
+ * delta string on the event and appends the same bytes into `partial`; tool
+ * arguments gain a third form, the parsed arguments object beside the raw
+ * JSON. A one-copy charge hid most of a large tool state, so each delta pays
+ * its real multiplicity instead of a flat record.
+ */
+function heldEventBytes(event, metadata) {
+  let bytes = EVENT_RECORD_BYTES;
+  if (typeof event.delta === "string") {
+    const copies = event.type === "toolcall_delta" ? TOOL_DELTA_COPIES : TEXT_DELTA_COPIES;
+    bytes += Buffer.byteLength(event.delta) * copies;
+  }
+  const part = event.toolCall ?? event.partial?.content?.[event.contentIndex];
+  if (part?.type === "toolCall") {
+    const size = [part.id, part.name, part.thoughtSignature]
+      .reduce((total, value) => total + (typeof value === "string" ? Buffer.byteLength(value) : 0), 0);
+    const previous = metadata.get(event.contentIndex) ?? 0;
+    bytes += Math.max(0, size - previous);
+    metadata.set(event.contentIndex, Math.max(previous, size));
+  }
+  return bytes;
+}
 /** The only retained output shim: keep late reasoning before visible output. */
 async function* orderedEvents(events, mapping, enabled, limit) {
   const pending = [];
+  const metadata = new Map();
   let bytes = 0;
   for await (const event of events) {
     const bodyEvent = event.type === "text_delta" || event.type.startsWith("toolcall_");
     if (enabled && bodyEvent) {
-      bytes += utf8.encode(event.delta ?? "").byteLength + 512;
+      bytes += heldEventBytes(event, metadata);
       if (bytes > limit) throw new Error("The reasoning-order buffer exceeds its byte limit.");
       pending.push(event);
       continue;
@@ -117,6 +153,7 @@ async function* orderedEvents(events, mapping, enabled, limit) {
     if (event.type === "done" || event.type === "error") {
       for (const held of pending) yield restoredEvent(held, mapping);
       pending.length = 0;
+      metadata.clear();
       bytes = 0;
     }
     yield restoredEvent(event, mapping);

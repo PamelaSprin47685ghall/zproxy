@@ -372,6 +372,7 @@ func zproxyWriteStream(w http.ResponseWriter, r *http.Request, parsed zproxyPars
 						}
 					}
 				}
+				stream.stop()
 				_ = writeSSEText(w, "[DONE]")
 				return
 			}
@@ -381,6 +382,7 @@ func zproxyWriteStream(w http.ResponseWriter, r *http.Request, parsed zproxyPars
 			switch event.Kind {
 			case antigravity.EventError:
 				writeOpenAIStreamError(w, r, event.Err)
+				stream.stop()
 				_ = writeSSEText(w, "[DONE]")
 				return
 			case antigravity.EventFinish:
@@ -392,6 +394,7 @@ func zproxyWriteStream(w http.ResponseWriter, r *http.Request, parsed zproxyPars
 				}
 				if !json.Valid(event.ToolCall.Arguments) {
 					writeOpenAIStreamError(w, r, errors.New("upstream tool arguments are not JSON"))
+					stream.stop()
 					_ = writeSSEText(w, "[DONE]")
 					return
 				}

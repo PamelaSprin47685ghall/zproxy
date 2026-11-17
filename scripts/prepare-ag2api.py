@@ -13,7 +13,7 @@ import tempfile
 from bundle_support import PLUGIN, ROOT, download, read_lock, run, sha256, source_snapshot
 
 
-TEST_PACKAGES = ("./cmd/zproxy-ag", "./internal/api", "./internal/service")
+TEST_PACKAGES = ("./cmd/zproxy-ag", "./internal/api", "./internal/service", "./internal/antigravity")
 
 
 def output(arguments, **options):

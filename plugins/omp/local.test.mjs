@@ -138,6 +138,56 @@ describe("the credential-free local OMP adapter", () => {
     expect(await response.text()).toContain("reasoning-order buffer exceeds");
   });
 
+  test("charges every retained copy of one large streamed delta", async () => {
+    // A reasoning-order hold keeps a delta in three places at once: the event
+    // itself, the parser's growing `partial`, and (for tool arguments) the
+    // parsed arguments object. A flat per-event charge counted only the first,
+    // so one large frame slipped under a limit its real retention exceeds.
+    const text = "t".repeat(100_000);
+    const blob = "a".repeat(30_000);
+    const tools = [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }];
+    const cases = [
+      [sse([{ choices: [{ index: 0, delta: { content: text } }] }, { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }, "[DONE]"]), 150 * 1024],
+      [sse([
+        { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_big", type: "function", function: { name: "lookup", arguments: "{\"blob\":\"" } }] }, finish_reason: null }] },
+        { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: blob } }] }, finish_reason: null }] },
+        { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: "\"}" } }] }, finish_reason: null }] },
+        { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }, "[DONE]",
+      ]), 70 * 1024],
+    ];
+    for (const [wire, maxVisibleBytes] of cases) {
+      const response = await raw("openai-completions", wire, { ...chatRequest, stream: true, tools }, { reasoningOrder: true, maxVisibleBytes });
+      expect(await response.text()).toContain("reasoning-order buffer exceeds");
+    }
+  });
+
+  test("bounds tool metadata retained while reasoning is ordered", async () => {
+    const wire = sse([
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "x".repeat(80_000), type: "function", function: { name: "lookup", arguments: "{}" } }] }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }, "[DONE]",
+    ]);
+    const request = { ...chatRequest, stream: true, tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }] };
+    const response = await raw("openai-completions", wire, request, { reasoningOrder: true, maxVisibleBytes: 64 * 1024 });
+    expect(await response.text()).toContain("reasoning-order buffer exceeds");
+  });
+
+  test("delivers a large tool state intact when the limit allows it", async () => {
+    const blob = "b".repeat(40_000);
+    const request = { ...chatRequest, stream: true, stream_options: { include_usage: true }, tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }] };
+    const wire = sse([
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_large", type: "function", function: { name: "lookup", arguments: "{\"blob\":\"" } }] }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: blob } }] }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: "\"}" } }] }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 } }, "[DONE]",
+    ]);
+    const response = await raw("openai-completions", wire, request, { reasoningOrder: true, maxVisibleBytes: 4 * 1024 * 1024 });
+    const text = await response.text();
+    const frames = text.split("\n\n").filter(frame => frame.startsWith("data: {")).map(frame => JSON.parse(frame.slice(6)));
+    const argumentsText = frames.flatMap(frame => frame.choices ?? []).flatMap(choice => choice.delta?.tool_calls ?? []).map(call => call.function?.arguments ?? "").join("");
+    expect(JSON.parse(argumentsText).blob.length).toBe(40_000);
+    expect(frames.find(frame => frame.usage?.total_tokens === 8)).toBeDefined();
+    expect(text.endsWith("data: [DONE]\n\n")).toBe(true);
+  });
   test("cancels the raw source when the response reader leaves", async () => {
     const cancelled = Promise.withResolvers();
     const source = new ReadableStream({ cancel() { cancelled.resolve(true); } });

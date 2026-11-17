@@ -62,6 +62,8 @@ def decode(path):
         "model": {"id": "gemini-fixture", "modelProvider": "MODEL_PROVIDER_GOOGLE",
                   "maxOutputTokens": 1024, "maxTokens": 4096},
     })
+    require(isinstance(prepared.get("userAgent"), str) and prepared["userAgent"] and
+            not any(c in prepared["userAgent"] for c in "\r\n"), "The codec omitted its official User-Agent.")
     require(prepared["body"]["project"] == "fixture-project", "The wire request lost its private project.")
     require(prepared["body"]["model"] == "gemini-fixture", "The wire request lost its resolved model.")
     require("fixture question" in json.dumps(prepared["body"]["request"]), "The wire request lost the prompt.")

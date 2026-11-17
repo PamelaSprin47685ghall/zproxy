@@ -31,7 +31,7 @@
 | `plugin-bridge` | 最新 `ModelRegistry.registerProvider` 已注册 OAuth 和自定义 API；stock gateway 仍不会自动加载用户安装的 provider 插件。 | **保留远端插件主机，移除 registry prototype 补丁。** 复用旧插件发现、最小 host 与包名兼容模块，直接调用官方注册接口。自定义 transport 走官方远端转换回退，不假定插件一定遵守 fetch 交接接口。交互式 UI 扩展仍不属于 gateway 能力。 |
 | `models-bridge` | stock auth-gateway 特意使用 `ignoreLocalModelConfig: true`，避免客户端本地配置覆盖 broker；本项目的 models.yml 明确由服务端管理员控制。 | **不再需要旧猴子补丁。** 远端直接以指定 models.yml 创建官方 ModelRegistry。URL、API key、header 和 OAuth 配置均留在服务端。这个替代来自部署边界改变，而不是声称 stock gateway 已自动启用该文件。 |
 | `traffic-log` | 新的按用户计数可以说明请求数、字节量、耗时和结果；它不等于旧的完整请求正文诊断日志。 | **退出旧正文流量日志。** 公开页面只显示昵称和计数，不记录或公开 prompt、工具正文、UUID、账户或 token。完整正文留存不是完成模型请求所必需的功能，也会增加远端开销。 |
-| `kiro-credential-sync` | 官方 AuthStorage 已主动采用共享 OMP 数据库的外部变化；这不等于监视 `kiro-cli` 自己的另一个数据库。 | **保留远端外部来源同步。** 只读 CLI 的 token 行，校验后通过官方 `storage.credentials.upsert` 更新已存在的 OAuth 身份。观察数据库及 WAL 变化；多账户无法可靠匹配时不猜测，不复制给客户端，也不沿用旧 shim 对 OMP 表结构的直接 SQL 更新。 |
+| `kiro-credential-sync` | 官方 AuthStorage 已主动采用共享 OMP 数据库的外部变化；这不等于监视 `kiro-cli` 自己的另一个数据库。 | **保留远端外部来源同步。** 只读 CLI 的 token 行，校验后通过官方本地凭据池的 `replaceById` 更新已存在的 OAuth 身份；该方法未列入公开的 `CredentialsApi` 类型，其他存储后端不提供时则不写入。观察数据库及 WAL 变化；多账户无法可靠匹配时不猜测，不复制给客户端，也不沿用旧 shim 对 OMP 表结构的直接 SQL 更新。 |
 
 上述仍需保留的远端兼容功能通过远端配置的 `shimsConfig` 读取固定的 v2 配置。没有 `shimsConfig` 时不会加载这些可选策略。旧配置中的 Antigravity 重提示、IPv6 IP 改写和正文日志开关不再启用对应旧实现；迁移时应删除这些已退出的配置，避免把旧开关当作仍然有效。[远端兼容主机](../plugins/omp/remote-features.mjs)
 

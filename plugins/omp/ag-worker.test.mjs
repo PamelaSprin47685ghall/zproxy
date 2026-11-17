@@ -56,18 +56,20 @@ function fakeChild(firstLine) {
   return child;
 }
 
-async function fakeWorker(child, run) {
+async function fakeWorker(child, run, options = {}) {
   const previous = process.env.TMPDIR;
   process.env.TMPDIR = import.meta.dir;
   const spawned = Promise.withResolvers();
+  let args;
   let socket;
-  const spawn = spyOn(Bun, "spawn").mockImplementation(args => {
-    socket = args[2];
+  const spawn = spyOn(Bun, "spawn").mockImplementation(argv => {
+    args = argv;
+    socket = argv[2];
     spawned.resolve();
     return child;
   });
-  const worker = createAgWorker({ binary: "/fixture/codec" });
-  try { await run(worker, spawned.promise, () => socket); }
+  const worker = createAgWorker({ binary: "/fixture/codec", ...options });
+  try { await run(worker, spawned.promise, () => socket, () => args); }
   finally {
     child.kill("SIGKILL");
     try { await worker.close(); }
@@ -193,3 +195,106 @@ test("private HTTP IPC response cancellation releases the pending input", async 
     await worker.close();
   }
 });
+
+test("only a worker given a state directory passes --state-dir to the codec", async () => {
+  for (const [options, expected] of [
+    [{}, 3],
+    [{ stateDir: "/fixture/state" }, 5],
+  ]) {
+    const child = fakeChild("READY\n");
+    await fakeWorker(child, async (worker, spawned, _socket, args) => {
+      // No fixture listens on the private socket, so the exchange fails after
+      // the spawn this test observes.
+      const pending = worker.request("/health", { method: "GET" }).catch(error => error);
+      await spawned;
+      expect(args()).toHaveLength(expected);
+      if (options.stateDir === undefined) expect(args()).toEqual(["/fixture/codec", "--socket", expect.any(String)]);
+      else expect(args()).toEqual(["/fixture/codec", "--socket", expect.any(String), "--state-dir", "/fixture/state"]);
+      // Nothing listens on this socket, so stopping the codec must also settle
+      // the exchange the worker already started.
+      child.kill("SIGKILL");
+      expect(await pending).toBeInstanceOf(Error);
+    }, options);
+  }
+});
+
+test("the official prepare reply is read strictly and a rejection keeps its status", async () => {
+  const served = [
+    { status: 200, body: JSON.stringify({ body: { project: "", model: "m", requestType: "agent", request: { contents: [] } } }) },
+    // A reply with an extra field is refused rather than silently accepted.
+    { status: 200, body: JSON.stringify({ body: { project: "", model: "m", requestType: "agent", request: {} }, handle: "leak" }) },
+    { status: 200, body: JSON.stringify({ envelope: { model: "m" } }) },
+    { status: 400, body: JSON.stringify({ error: { type: "invalid_request", message: "invalid official request" } }) },
+    { status: 429, body: JSON.stringify({ error: { type: "rate_limit_error", message: "the official account limit is reached" } }) },
+    { status: 502, body: JSON.stringify({ error: { type: "upstream_error", message: "x".repeat(9000) } }) },
+  ];
+  const seen = { prepared: [], sent: [] };
+  let server;
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = import.meta.dir;
+  let exiting;
+  const spawn = spyOn(Bun, "spawn").mockImplementation(args => {
+    // The worker allocates its own private socket; the fixture binds that exact
+    // path, so the real private HTTP exchange runs end to end.
+    server = Bun.serve({
+      unix: args[2],
+      async fetch(request) {
+        const body = await request.json();
+        const path = new URL(request.url).pathname;
+        if (path === "/official-prepare") {
+          seen.prepared.push(body);
+          const row = served.shift();
+          return new Response(row.body, { status: row.status, headers: { "content-type": "application/json" } });
+        }
+        if (path === "/official-send") {
+          seen.sent.push(body);
+          return new Response('data: {"candidates":[]}\n\n', { headers: { "content-type": "text/event-stream" } });
+        }
+        return new Response(null, { status: 404 });
+      },
+    });
+    return {
+      exitCode: null,
+      stdout: new ReadableStream({ start(target) { target.enqueue(encoder.encode("READY\n")); target.close(); } }),
+      stderr: new ReadableStream({ start(target) { target.close(); } }),
+      // The worker stops the child by signal and then awaits its exit, so the
+      // fixture must report one.
+      exited: new Promise(resolve => { exiting = resolve; }),
+      kill() { exiting(0); },
+    };
+  });
+  const worker = createAgWorker({ binary: "/fixture/codec" });
+  try {
+    const first = await worker.officialPrepare({ version: 1 });
+    expect(first.body).toEqual({ project: "", model: "m", requestType: "agent", request: { contents: [] } });
+    for (const [count, message] of [[2, "unexpected fields"], [3, "unexpected fields"]]) {
+      const error = await worker.officialPrepare({ version: 1 }).catch(value => value);
+      expect([seen.prepared.length, error.message]).toEqual([count, expect.stringContaining(message)]);
+    }
+    // A rejection carries its status and one fixed local sentence; the worker's
+    // own text is never parsed, buffered, or repeated.
+    for (const status of [400, 429]) {
+      const error = await worker.officialPrepare({ version: 1 }).catch(value => value);
+      expect([error.status, error.message]).toEqual([status, "The Antigravity codec rejected the request."]);
+      expect(error.message).toBe("The Antigravity codec rejected the request.");
+    }
+    // A large rejection body is not read, so nothing from it can surface.
+    const error = await worker.officialPrepare({ version: 1 }).catch(value => value);
+    expect(error.status).toBe(502);
+    expect(error.message).toBe("The Antigravity codec rejected the request.");
+    expect(error.message).not.toContain("xxxx");
+    expect(seen.prepared).toHaveLength(6);
+    const sent = await worker.officialSend({ version: 1, handle: "h", body: { project: "", model: "m", requestType: "agent", request: {} } });
+    expect(sent.status).toBe(200);
+    expect(sent.headers.get("content-type")).toBe("text/event-stream");
+    await sent.body.cancel();
+    expect(seen.sent).toHaveLength(1);
+    expect(seen.sent[0]).toEqual({ version: 1, handle: "h", body: { project: "", model: "m", requestType: "agent", request: {} } });
+  } finally {
+    await worker.close();
+    server?.stop(true);
+    spawn.mockRestore();
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+  }
+}, 10000);
