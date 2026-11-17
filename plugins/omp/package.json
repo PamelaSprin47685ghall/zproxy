@@ -88,7 +88,6 @@
     "ipc-response.mjs",
     "local-codec.mjs",
     "local.mjs",
-    "patch-shims.mjs",
     "patch-upstream.mjs",
     "remote-accounts.mjs",
     "remote-ag-devices.mjs",
@@ -105,7 +104,10 @@
     "bunfig.toml",
     "upstream.lock.json",
     "vendor",
-    "node_modules"
+    "node_modules",
+    "router",
+    "shim",
+    "presets"
   ],
   "scripts": {
     "test": "./bin/bun test ./*.test.mjs --timeout 30000"

@@ -27,12 +27,12 @@ python3 scripts/smoke-appimage.py --image artifacts/zproxy-omp-linux-x64.AppImag
 ```
 
 `prepare-omp.py` accepts `--source PATH` for an existing checkout at the exact
-pinned OMP commit, `--shims-source PATH` for the pinned original omp-shims
-checkout, and `--bun PATH` for the exact pinned Bun version. The build
+pinned OMP commit and `--bun PATH` for the exact pinned Bun version. The build
 uses `upstream.lock.json` and the frozen `bun.lock`; installation scripts are
-disabled. The original omp-shims snapshot has no runtime npm dependencies.
-The OMP and omp-shims patches have before/after hash checks. A source
-change must be reviewed and repinned before the patch can be applied.
+disabled. The OMP patch has before/after hash checks. A source change must be
+reviewed and repinned before the patch can be applied. The routing engine and
+host bridge live in this repository (`router/`, `shim/`, `presets/`) and are not
+fetched or patched at build time.
 
 `prepare-ag2api.py` fetches the pinned Antigravity2API commit and Go toolchain,
 checks `go.mod`, `go.sum`, and the upstream license, then adds the new files in

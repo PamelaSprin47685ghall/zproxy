@@ -1,0 +1,14 @@
+{
+  "name": "@earendil-works/pi-coding-agent",
+  "version": "0.99.2",
+  "type": "module",
+  "main": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs"
+    }
+  },
+  "license": "MIT"
+}

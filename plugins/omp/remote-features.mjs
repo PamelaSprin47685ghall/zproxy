@@ -10,14 +10,14 @@ import { parseRequest as parseResponses } from "@oh-my-pi/pi-ai/providers/openai
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import { loadConfig } from "./vendor/shims/lib/config.mjs";
-import { report } from "./vendor/shims/lib/contracts.mjs";
-import { CredentialRepository } from "./vendor/shims/lib/credentials.mjs";
-import { installVendorPlugin, loadVendorShim, registerExtensionProviderMeta } from "./vendor/shims/lib/host-bridge.mjs";
-import { discoverPlugins, createPluginHost } from "./vendor/shims/features/plugin-bridge.mjs";
-import { extractPrompt, isAutoModel, isCopilotEndpoint } from "./vendor/shims/features/copilot-auto.mjs";
-import { rewriteClineBody, isClineChatUrl } from "./vendor/shims/features/cline-pin-upstream.mjs";
-import { readOutboundBodyText, requestUrl, withRequestBody } from "./vendor/shims/lib/outbound.mjs";
+import { loadConfig } from "./shim/config.mjs";
+import { report } from "./shim/contracts.mjs";
+import { CredentialRepository } from "./shim/credentials.mjs";
+import { installVendorPlugin, loadVendorShim, registerExtensionProviderMeta } from "./shim/host-bridge.mjs";
+import { discoverPlugins, createPluginHost } from "./shim/plugin-bridge.mjs";
+import { extractPrompt, isAutoModel, isCopilotEndpoint } from "./shim/copilot-auto.mjs";
+import { rewriteClineBody, isClineChatUrl } from "./shim/cline-pin-upstream.mjs";
+import { readOutboundBodyText, requestUrl, withRequestBody } from "./shim/outbound.mjs";
 import { descriptorFor } from "./contract.mjs";
 
 const infoByResponse = new WeakMap();

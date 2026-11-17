@@ -46,7 +46,7 @@ python3 scripts/smoke-native.py --binary artifacts/linux-x64/ZProxy
 
 ### 可选 OMP 与 AppImage
 
-重插件固定使用 OMP **18.20.3**（`67ef5342de6c24587fc59a6dbd3a2ab918510541`）、Bun **1.4.4**、原 omp-shims **2.0.0**（`34189f420516f5ceeb8373998cc31896553c57ea`）和 Antigravity2API **0.1.8**（`d36920f3e178eb6d94a49c0b184947cb7df8b3b1`）。来源、下载校验值在 [upstream.lock.json](plugins/omp/upstream.lock.json)，npm 版本由冻结的 [bun.lock](plugins/omp/bun.lock) 锁定。构建不会跟随上游移动分支；升级须更新固定版本并重新检查交接补丁和 Go 适配层。
+重插件固定使用 OMP **18.20.3**（`67ef5342de6c24587fc59a6dbd3a2ab918510541`）、Bun **1.4.4** 和 Antigravity2API **0.1.8**（`d36920f3e178eb6d94a49c0b184947cb7df8b3b1`）。路由引擎与宿主桥接（`plugins/omp/router`、`plugins/omp/shim`）由本仓库维护，来源与许可见 [NOTICE-shims.md](plugins/omp/NOTICE-shims.md)。来源、下载校验值在 [upstream.lock.json](plugins/omp/upstream.lock.json)，npm 版本由冻结的 [bun.lock](plugins/omp/bun.lock) 锁定。构建不会跟随上游移动分支；升级须更新固定版本并重新检查交接补丁和 Go 适配层。
 
 在已有 NativeAOT 产物基础上，使用 Python 3.11 或更新版本：
 
@@ -196,7 +196,7 @@ server 与 client 命令分别在远端和本机执行，且沿用前文各自�
 
 ### 复用原路由策略
 
-如需原 omp-shims 的共享路由，在 `remote.json` 加入 `"shimsConfig": "./shims.json"`，指向现有 v2 配置。该配置启用 `lazy-router` 后，远端使用固定版本原源码中的策略、健康、亲和、并发、速度和状态存储组件；实际凭据操作接回当前官方 OMP。多个用户共享远端的路由信息，用户隧道身份仍各自独立。
+如需共享路由，在 `remote.json` 加入 `"shimsConfig": "./shims.json"`，指向现有 v2 配置。该配置启用 `lazy-router` 后，远端使用本仓库 `router/` 中的策略、健康、亲和、并发、速度和状态存储组件；实际凭据操作接回当前官方 OMP。多个用户共享远端的路由信息，用户隧道身份仍各自独立。
 
 `rating` 节点按候选的能力先验、相对成本、实测延迟和前缀亲和性评分，并按配置温度探索；`features["lazy-router"].routing` 中的权重会传入评分。路由图中未设置 `intelligence` 或 `cost` 时使用上游默认值 50 和 1，不代表对模型能力或实际账单的测量。内置路由的候选使用这些相同默认值，因此仅改变能力或成本权重不会区分它们；需要区分时，应在路由图中配置候选值。
 
@@ -328,7 +328,7 @@ OMP 的 `/v1/completions` 是 text prompt 到 chat 的兼容入口：只接受�
 
 远端 `RemoteHandler` 接收服务器认证出的用户身份，返回原始响应和 [Contracts.fs](src/ZProxy/Contracts.fs) 的版本化元数据：解码器名、版本、模型别名、请求标识、尝试序号、流式标记及受限 `recipe`。OMP recipe 最多 8 KiB，字段固定为线格式、公开模型属性和所需解析兼容开关。它没有任意请求选项字典，不能装入账户快照、用户 UUID、selector、token、Cookie、上游地址或完整请求头；本体和 worker 分别校验。未知解码器或不兼容版本会使请求失败，不猜测响应格式。
 
-OMP 插件在**远端完成凭据选择、请求构造和首段错误检查之后、官方完整下行解析器开始消费之前**交接成功响应。对官方源码和原路由源码的改动分别放在 [patch-upstream.mjs](plugins/omp/patch-upstream.mjs) 与 [patch-shims.mjs](plugins/omp/patch-shims.mjs)：每个补丁位置检查修改前、修改后的 SHA-256，源码漂移时终止准备。账户刷新、路由和健康状态不搬到本机；已经开始对外输出的请求不会因为隧道断线而重放。
+OMP 插件在**远端完成凭据选择、请求构造和首段错误检查之后、官方完整下行解析器开始消费之前**交接成功响应。对官方 OMP 源码的改动放在 [patch-upstream.mjs](plugins/omp/patch-upstream.mjs)：每个补丁位置检查修改前、修改后的 SHA-256，源码漂移时终止准备。路由引擎与宿主桥接是本仓库自己的源码，不再从上游抓取或打补丁。账户刷新、路由和健康状态不搬到本机；已经开始对外输出的请求不会因为隧道断线而重放。
 
 handler 的调用者持有输入请求，并在最终响应使用完后释放它。请求插件借用输入请求；丢弃下层响应时须释放它。解码器接管原始响应，可以关闭它，或把生命周期交给返回的正文流；失败和取消仍须清理，返回流仍依赖它时不能提前关闭。解码器收到原始本地请求对象，但上传正文可能已被消费；需要解析上下文的插件须自行保存。OMP 的实现将原上传写入私有临时文件，随返回正文的生命周期删除；本体通用管道不会擅自缓存或重放上传。自建请求、进程和任务由插件管理。
 

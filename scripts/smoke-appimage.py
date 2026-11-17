@@ -50,8 +50,6 @@ def main():
         manifest = json.loads((appdir / "usr/share/zproxy/bundle.json").read_text())
         if manifest["upstream"]["upstream"]["commit"] != lock["upstream"]["commit"]:
             raise RuntimeError("The image includes a different OMP source revision.")
-        if manifest["upstream"]["shims"]["commit"] != lock["shims"]["commit"]:
-            raise RuntimeError("The image includes a different omp-shims source revision.")
         worker = plugin / "bin/zproxy-ag"
         if (manifest["ag2apiWorker"]["source"] != lock["ag2api"]
                 or manifest["ag2apiWorker"]["workerSha256"] != sha256(worker)):
@@ -60,7 +58,7 @@ def main():
             raise RuntimeError("The AG2API source build tree must not enter the image.")
         run([sys.executable, ROOT / "scripts/smoke-ag2api.py", "--binary", worker], env=environment, timeout=60)
         run([bun, "-e", 'import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry"; '
-             'import { LazyRouter } from "./vendor/shims/lib/router/router.mjs"; '
+             'import { LazyRouter } from "./router/router.mjs"; '
              'await import("@oh-my-pi/pi-ai/providers/openai-chat-server"); '
              'if (typeof ModelRegistry !== "function" || typeof LazyRouter !== "function") '
              'throw new Error("OMP import failed"); process.exit(0);'],

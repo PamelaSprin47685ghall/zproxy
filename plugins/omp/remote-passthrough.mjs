@@ -7,7 +7,7 @@ import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { mapRequestToolIds } from "./contract.mjs";
 import { admit, rejectedResponse, timeoutRead } from "./remote-handoff.mjs";
-import { createUsageTap } from "./vendor/shims/lib/router/router.mjs";
+import { createUsageTap } from "./router/router.mjs";
 
 const SAFE_HEADERS = ["content-type", "cache-control", "retry-after"];
 

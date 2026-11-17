@@ -1,6 +1,6 @@
 # OMP 兼容功能盘查与迁移边界
 
-本次把 zproxy 作为主程序，OMP 作为选配的 Bun 工作进程。远端运行真实的官方 OMP gateway，负责模型目录、请求构造、账户选择、刷新、共享健康状态和发请求。本地运行官方 OMP provider 的响应适配器，负责把上游原始流转换为 OpenAI 响应。旧 `omp-shims` 的整个 preload/runtime 不再加载。
+本次把 zproxy 作为主程序，OMP 作为选配的 Bun 工作进程。远端运行真实的官方 OMP gateway，负责模型目录、请求构造、账户选择、刷新、共享健康状态和发请求。本地运行官方 OMP provider 的响应适配器，负责把上游原始流转换为 OpenAI 响应。旧 `omp-shims` 的 preload/runtime 不再加载；其中的路由引擎与宿主桥接已并入本仓库 `plugins/omp/router` 与 `plugins/omp/shim`，由本仓库维护。
 
 这不是把 13 个旧功能全部判定为“官方已经支持”。已经有官方实现的部分直接复用；仍然需要的策略留在相应边界；与加速目标冲突的旧行为明确退出，见下面逐项说明。
 
@@ -9,7 +9,7 @@
 | 项目 | 固定版本 | 依据 |
 | --- | --- | --- |
 | OMP | `18.20.3`，`67ef5342de6c24587fc59a6dbd3a2ab918510541` | [官方源代码](https://github.com/can1357/oh-my-pi/tree/67ef5342de6c24587fc59a6dbd3a2ab918510541) |
-| omp-shims | `2.0.0`，`34189f420516f5ceeb8373998cc31896553c57ea` | [13 项功能及默认配置](https://github.com/PamelaSprin47685ghall/omp-shims/blob/34189f420516f5ceeb8373998cc31896553c57ea/lib/config.mjs) |
+| 路由引擎 | 本仓库 `plugins/omp/router`、`plugins/omp/shim`（源自 omp-shims 2.0.0 快照，已重组并自维护） | [功能与默认配置](plugins/omp/shim/config.mjs) |
 | Bun | `1.4.4` | [构建锁文件](../plugins/omp/upstream.lock.json) |
 | Antigravity2API（选配） | `0.1.8`，`d36920f3e178eb6d94a49c0b184947cb7df8b3b1` | [固定源码](https://github.com/Mag1cFall/Antigravity2API/tree/d36920f3e178eb6d94a49c0b184947cb7df8b3b1)、[适配边界](AG2API.md) |
 

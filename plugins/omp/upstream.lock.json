@@ -37,26 +37,6 @@
     "url": "https://go.dev/dl/go1.27.4.linux-amd64.tar.gz",
     "sha256": "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840"
   },
-  "shims": {
-    "repository": "https://github.com/PamelaSprin47685ghall/omp-shims.git",
-    "commit": "34189f420516f5ceeb8373998cc31896553c57ea",
-    "version": "2.0.0",
-    "paths": [
-      "LICENSE",
-      "README.md",
-      "package.json",
-      "bun.lock",
-      "bunfig.toml",
-      "index.mjs",
-      "preload.mjs",
-      "registry-capture.mjs",
-      "antigravity-unpause.mjs",
-      "lib",
-      "features",
-      "presets",
-      "vendor"
-    ]
-  },
   "bunLicense": {
     "url": "https://raw.githubusercontent.com/oven-sh/bun/bun-v1.4.4/LICENSE.md",
     "sha256": "362fe32c954ec829240bd7429c53d705eef08c6bfa45ffc2d02005f857cba4dd"

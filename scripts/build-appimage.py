@@ -168,7 +168,7 @@ def check_links(appdir):
 def copy_notices(lock, cache, appdir, dotnet_root):
     destination = appdir / "usr/share/licenses/zproxy-omp"
     copy_file(PLUGIN / "vendor/omp/LICENSE", destination / "OMP-LICENSE")
-    copy_file(PLUGIN / "vendor/shims/LICENSE", destination / "omp-shims-LICENSE")
+    copy_file(PLUGIN / "NOTICE-shims.md", destination / "omp-shims-NOTICE.md")
     shutil.copytree(PLUGIN / "bin/zproxy-ag-licenses", destination / "ag2api")
     for key, name in (("bunLicense", "Bun-LICENSE.md"), ("appImageRuntimeLicense", "AppImage-runtime-LICENSE")):
         copy_file(download(lock[key], cache / name), destination / name)
@@ -209,7 +209,7 @@ def main():
     if not binary.is_file() or not os.access(binary, os.X_OK):
         parser.error("--binary must be the published NativeAOT executable.")
     lock = read_lock()
-    for name, pin in (("omp", lock["upstream"]), ("shims", lock["shims"]), ("ag2api", lock["ag2api"])):
+    for name, pin in (("omp", lock["upstream"]), ("ag2api", lock["ag2api"])):
         marker = PLUGIN / "vendor" / name / "SOURCE_COMMIT"
         if not marker.is_file() or marker.read_text().strip() != pin["commit"]:
             script = "prepare-ag2api.py" if name == "ag2api" else "prepare-omp.py"
@@ -258,7 +258,6 @@ def main():
             "upstream": lock,
             "npmLockSha256": sha256(PLUGIN / "bun.lock"),
             "upstreamPatchSha256": sha256(PLUGIN / "patch-upstream.mjs"),
-            "shimsPatchSha256": sha256(PLUGIN / "patch-shims.mjs"),
             "sharedLibraries": libraries,
         }
         manifest_path = appdir / "usr/share/zproxy/bundle.json"

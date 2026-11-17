@@ -54,7 +54,6 @@ test("a second refusal extends the bench and a shorter one cannot cut it", () =>
   expect(cooldowns.blocked("provider", 7)).toBe(false);
 });
 
-import { patchShims } from "./patch-shims.mjs";
 
 const encoder = new TextEncoder();
 const payload = 'data: {"choices":[{"index":0,"delta":{"content":"raw answer"},"finish_reason":null}]}\n\n'
@@ -206,17 +205,6 @@ test("the private IPC hop carries the refusal classification and nothing else", 
     else process.env.TMPDIR = previous;
   }
 }, 10000);
-
-test("shim patches reject upstream drift", async () => {
-  const root = join(import.meta.dir, "vendor/shims");
-  expect(await patchShims(root)).toBe(0);
-  const folder = await mkdtemp(join(tmpdir(), "zproxy-routing-patch-"));
-  try {
-    await cp(join(root, "lib/router"), join(folder, "lib/router"), { recursive: true });
-    await writeFile(join(folder, "lib/router/dispatcher.mjs"), "changed upstream");
-    await expect(patchShims(folder)).rejects.toThrow("The pinned shim source changed");
-  } finally { await rm(folder, { recursive: true, force: true }); }
-});
 
 test("direct AG scheduling prefers eligible fresh accounts and skips inaccessible accounts", () => {
   const candidates = [1, 2, 3, 4].map(account => ({ account }));

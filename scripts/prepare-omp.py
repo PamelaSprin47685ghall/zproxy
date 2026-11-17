@@ -40,7 +40,6 @@ def link_native():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", help="Use an existing checkout at the exact pinned commit.")
-    parser.add_argument("--shims-source", help="Use an existing omp-shims checkout at its pinned commit.")
     parser.add_argument("--bun", help="Use an existing executable at the exact pinned Bun version.")
     parser.add_argument("--cache", type=Path, default=ROOT / "artifacts/cache")
     arguments = parser.parse_args()
@@ -52,11 +51,9 @@ def main():
     bun = prepare_bun(lock, cache, arguments.bun)
     paths = ["LICENSE", "package.json", *["packages/" + name for name in lock["upstream"]["packages"]]]
     source = source_snapshot(lock["upstream"], cache, arguments.source, "omp", paths)
-    shims = source_snapshot(lock["shims"], cache, arguments.shims_source, "shims", lock["shims"]["paths"])
     run([bun, "install", "--production", "--frozen-lockfile", "--ignore-scripts"], cwd=PLUGIN)
     link_native()
     run([bun, PLUGIN / "patch-upstream.mjs", source])
-    run([bun, PLUGIN / "patch-shims.mjs", shims])
     (PLUGIN / "bin").mkdir(exist_ok=True)
     if bun != (PLUGIN / "bin/bun").resolve():
         shutil.copy2(bun, PLUGIN / "bin/bun")

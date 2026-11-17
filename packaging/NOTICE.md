@@ -13,9 +13,11 @@ package versions, and the required glibc version in
 The bundled OMP package sources are in `usr/lib/zproxy/omp/vendor/omp`; the checked zproxy
 patch is `usr/lib/zproxy/omp/patch-upstream.mjs`. JavaScript package licenses and
 native third-party notices remain in their original package directories.
-The pinned original omp-shims source is in `usr/lib/zproxy/omp/vendor/shims`.
-Its independent routing primitives are reused by the optional remote policy.
-Its checked raw-response patch is `usr/lib/zproxy/omp/patch-shims.mjs`.
+The routing engine and host bridge in `usr/lib/zproxy/omp/router` and
+`usr/lib/zproxy/omp/shim` are maintained in this repository. They began as a
+snapshot of the MIT-licensed `omp-shims` project and have been reorganised and
+edited here; the provenance and license terms are recorded in
+`usr/lib/zproxy/omp/NOTICE-shims.md`.
 The AG2API worker is built from the pinned module plus additive zproxy codec
 files. The source repository and exact revision are in the build record.
 It does not start the AG2API application, account store, login flow, updater,
@@ -27,7 +29,7 @@ tree, a Go compiler, or a Go module cache.
 
 OMP source: https://github.com/can1357/oh-my-pi
 
-omp-shims source: https://github.com/PamelaSprin47685ghall/omp-shims
+routing layer provenance (omp-shims snapshot, reorganized here): https://github.com/PamelaSprin47685ghall/omp-shims
 
 AG2API source: https://github.com/Mag1cFall/Antigravity2API
 
