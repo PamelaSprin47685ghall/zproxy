@@ -2,8 +2,8 @@
   "schema": 1,
   "upstream": {
     "repository": "https://github.com/can1357/oh-my-pi.git",
-    "commit": "67ef5342de6c24587fc59a6dbd3a2ab918510541",
-    "version": "18.20.3",
+    "commit": "f40f335845f0b136453d12fec8d6057011082766",
+    "version": "19.0.1",
     "packages": [
       "stats",
       "omptype",
@@ -43,8 +43,8 @@
   },
   "native": {
     "package": "@oh-my-pi/pi-natives-linux-x64",
-    "version": "18.20.3",
-    "integrity": "sha512-6n+LTmff5CDSgliP4FC6iQG12HI3vc/LpcM51ZiYIHnDn5Iu7Hn+mnrHnhWOh3GzVVjVR+vt5M9/CY89Ntd76w=="
+    "version": "19.0.1",
+    "integrity": "sha512-AARFjaugklIIVD719sFO1p+M+wiP/KaIt7XFldi19/yvzEmXonUx3kfYtsyiZX21i7rCTM1w4vI6faP4HAOqkA=="
   },
   "appImageTool": {
     "version": "1.9.1",

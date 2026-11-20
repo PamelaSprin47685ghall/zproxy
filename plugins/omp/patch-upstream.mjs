@@ -7,8 +7,8 @@ import { resolve } from "node:path";
 const patches = [
   {
     "path": "packages/ai/src/registry/oauth/index.ts",
-    "before": "0844af7af1ca660111fc1ba128f184ce98aca8bb3ba835a980e63649799889be",
-    "after": "a2086dc958a42ac6ee911c74d0d3bf302c086fb8df22b4b0d1a6e5b1e2e5fb56",
+    "before": "8c1e2821068805be1d733d48880fc0811b576f6bdbb9161fed4d894072ae9b18",
+    "after": "b3ac10af301ed322fde6369ecfbbc68922846266a70652d1c6ce36238684de81",
     "old": "/**\n * Turns paused providers back on:",
     "new": "/** zproxy: read a copy so server opt-in leases preserve the user's existing choices. */\nexport function getUnpausedProviders(): ReadonlySet<string> {\n\treturn new Set(unpausedProviders);\n}\n\n/**\n * Turns paused providers back on:"
   },
