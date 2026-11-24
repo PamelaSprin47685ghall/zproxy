@@ -82,3 +82,31 @@ test("cancel closes an account scope and missing accounts fail closed", async ()
   expect(() => saved.credentialSessionId("fixture", "same")).toThrow();
   await expect(accounts.dispatch(request(), "private", user, { provider: "fixture", credentialId: 999999 }, () => { throw new Error("must not run"); })).rejects.toThrow("not available");
 });
+
+test("a caller deadline does not abort the official OAuth refresh", async () => {
+  await storage.credentials.set("openai-codex", [
+    { type: "oauth", access: "old-access", refresh: "old-refresh", expires: Date.now() - 1000, accountId: "acct", email: "acct@example.invalid" },
+  ]);
+  const row = storage.credentials.list("openai-codex")[0];
+  let passed = "unset";
+  let finish;
+  const hung = new Promise(resolve => { finish = resolve; });
+  storage.oauth.refresh = (id, signal) => {
+    expect(id).toBe(row.id);
+    passed = signal;
+    return hung;
+  };
+  expect(await accounts.credentials.refresh(row.id, { timeoutMs: 20 })).toBeUndefined();
+  expect(passed).toBeUndefined();
+  let settled = false;
+  const pending = hung.then(() => { settled = true; });
+  expect(settled).toBe(false);
+  finish();
+  await pending;
+  expect(settled).toBe(true);
+  storage.oauth.refresh = async id => {
+    expect(id).toBe(row.id);
+    return { id };
+  };
+  expect((await accounts.credentials.refresh(row.id, { timeoutMs: 1000 })).secret).toBe("old-access");
+});

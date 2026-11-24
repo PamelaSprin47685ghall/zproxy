@@ -25,7 +25,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/service"
 )
 
-const upstreamVersion = "d36920f3e178eb6d94a49c0b184947cb7df8b3b1"
+const upstreamVersion = "d9614e93633dd48f595fdcc90f7fe9ede0086626"
 const maxRequest = 64 << 20
 const maxRawResponse = 128 << 20
 
@@ -388,6 +388,15 @@ func run(socket, stateDir string) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if stateDir != "" {
+		feed := openRejectedFeed(stateDir)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			feed.watch(ctx)
+		}()
+		defer func() { cancel(); <-done }()
+	}
 	server := &http.Server{ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 65536,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
 	var stopOnce sync.Once

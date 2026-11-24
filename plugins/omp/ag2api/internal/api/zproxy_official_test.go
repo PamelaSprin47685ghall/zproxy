@@ -443,6 +443,30 @@ func TestZProxyOfficialPrepareKeepsScopesApart(t *testing.T) {
 	}
 }
 
+func TestZProxyOfficialPrepareKeepsTheWirePrefixOnAppend(t *testing.T) {
+	projection, model, device := zproxyOfficialTestProjection(), zproxyOfficialTestCatalog(), zproxyOfficialTestDevice()
+	sessions := zproxyOfficialTestSessions(t)
+	client := &zproxyFakeCompanion{}
+	prepare := func(messages string) antigravity.WireRequest {
+		t.Helper()
+		raw := []byte(`{"model":"friendly","messages":[{"role":"system","content":"Keep answers short"},{"role":"user","content":"Hello"}` + messages + `]}`)
+		envelope, err := ZProxyOfficialPrepare(context.Background(), raw, projection, model, "scope", "project", device, sessions, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return envelope.Request
+	}
+	first := prepare("")
+	next := prepare(`,{"role":"assistant","content":"Hi"},{"role":"user","content":"How are you?"}`)
+	if !reflect.DeepEqual(first.SystemInstruction, next.SystemInstruction) {
+		t.Fatal("continuing a conversation changed its wire system instruction")
+	}
+	if len(next.Contents) != len(first.Contents)+2 ||
+		!reflect.DeepEqual(first.Contents, next.Contents[:len(first.Contents)]) {
+		t.Fatal("continuing a conversation changed its existing wire messages")
+	}
+}
+
 // TestZProxyOfficialPrepareSendsTheOfficialSessionFields proves the session
 // turn carries the official fields: the derived conversation, the new flag, the
 // account catalog entry, the composed contents, the per-section token counts,

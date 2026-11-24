@@ -105,7 +105,7 @@ export function classifyFailure({ verdict, upstreamContacted }, clientSignal) {
   return FAILURE.UNIT;
 }
 
-const THROWN_QUOTA = /quota|resource[_\s-]?exhausted|billing|payment required|retry[_\s-]?delay|maxdelayms/i;
+const THROWN_QUOTA = /quota|insufficient[_\s-]?credit|credits?\b|balance|resource[_\s-]?exhausted|budget[_\s-]?exhausted|billing|payment required|retry[_\s-]?delay|maxdelayms/i;
 const THROWN_CREDENTIAL = /unauthorized|forbidden|invalid_grant|credential|api key/i;
 
 /** The provider status named by a thrown error, or 0. */

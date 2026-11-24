@@ -6,6 +6,7 @@ import { chmod, mkdir, open } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { createRemoteAccounts } from "./remote-accounts.mjs";
 import { loadConfig } from "./shim/config.mjs";
+import { clearProviderBlocks } from "./shim/credentials.mjs";
 import { activePin } from "./shim/contracts.mjs";
 import { readJson } from "./shim/inbound.mjs";
 import { AdmissionControl } from "./router/admission.mjs";
@@ -15,6 +16,7 @@ import { InFlightTracker } from "./router/capacity.mjs";
 import { ModelCatalog } from "./router/catalog.mjs";
 import { disallowedClientModelRequest, forbiddenModelResponse } from "./router/client-model-policy.mjs";
 import { CyclicSpeed } from "./router/cyclic-speed.mjs";
+import { sanitizeDirectResponse } from "./router/direct-guard.mjs";
 import { GatewayDispatcher } from "./router/dispatcher.mjs";
 import { createEventLog } from "./router/events.mjs";
 import { FaultInjector } from "./router/faults.mjs";
@@ -265,7 +267,10 @@ export async function createRemoteRouting({ config, storage, registry, dispatch,
   // Even without the router, the private classification must not reach a
   // caller: this layer owns that boundary whether or not it schedules.
   if (!settings.enabled) {
-    return { dispatch: async (request, peer, scope) => dropPrivateHeaders(await dispatch(request, peer, scope)) };
+    return {
+      dispatch: async (request, peer, scope) =>
+        dropPrivateHeaders(await sanitizeDirectResponse(await dispatch(request, peer, scope))),
+    };
   }
   const base = dirname(config.shimsConfig);
   const loaded = loadPlanData(settings.routesFile ? resolve(base, settings.routesFile) : undefined);
@@ -437,8 +442,33 @@ export async function createRemoteRouting({ config, storage, registry, dispatch,
           } else {
             const started = Date.now();
             const epoch = store.captureTokenEpoch();
+            // This is the only boundary where a direct provider answer reaches
+            // the caller without the router's classification. Replace an
+            // account-status reply before it can carry a provider status, URL,
+            // or billing text.
             response = await dispatcher.forward(request);
-            if (resolved) {
+            if (response.status === 402 && format !== undefined) {
+              // A provider may answer 402 when concurrent budget reservations
+              // collide, while the account still has credit. Clear the block
+              // written for that one answer and ask once more.
+              const provider = resolved?.provider ?? "mistral";
+              await clearProviderBlocks(config.authDatabase, provider);
+              const headers = new Headers(request.headers);
+              headers.delete("content-length");
+              headers.delete("content-encoding");
+              response = await dispatcher.forward(new Request(request.url, {
+                method: request.method,
+                headers,
+                body: JSON.stringify(body),
+                signal: request.signal,
+              }));
+              // The retry may answer 402 too and write a fresh block. Clear it
+              // before returning: one upstream answer must not bench the
+              // account for the provider's whole cooldown.
+              if (response.status === 402) await clearProviderBlocks(config.authDatabase, provider);
+            }
+            response = await sanitizeDirectResponse(response);
+            if (resolved && response.ok) {
               const ref = `${resolved.provider}/${resolved.id}`;
               response = router.measureDirect(ref, response, started, request.signal, epoch);
             }

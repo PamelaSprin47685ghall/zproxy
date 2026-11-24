@@ -288,12 +288,27 @@ test("keeps prompt-feedback refusal frames for the real local AG decoder", async
   expect((await unpack(response)).raw).toBe(refusal);
 });
 
+test("keeps cache hits in the final usage sent to the local decoder", async () => {
+  const first = sse({ response: { candidates: [{ content: { role: "model", parts: [{ text: "answer" }] } }],
+    usageMetadata: { promptTokenCount: 12, cachedContentTokenCount: 8 } } });
+  const last = sse({ response: { candidates: [{ finishReason: "STOP" }],
+    usageMetadata: { candidatesTokenCount: 3, totalTokenCount: 15 } } });
+  const source = fixture({ send: () => stream(first + last) });
+  const { raw } = await unpack(await source.invoke());
+  const final = JSON.parse(raw.trimEnd().split("\n\n").at(-1).slice("data: ".length));
+  expect(final.response.usageMetadata).toEqual({
+    promptTokenCount: 12, cachedContentTokenCount: 8, candidatesTokenCount: 3, totalTokenCount: 15,
+  });
+  expect(source.seen.usage[0].usage).toEqual({ input: 4, output: 3, cacheRead: 8, cacheWrite: 0 });
+});
+
 test("carries one prepared envelope through every continuation segment under the same account", async () => {
   const first = sse({ response: { candidates: [{ content: { role: "model", parts: [{ text: "first" }] } }] } })
+    + sse({ response: { usageMetadata: { promptTokenCount: 2, cachedContentTokenCount: 1 } } })
     + sse({ response: { candidates: [{ finishReason: "CONTINUATION", continuationToken: "private-next-token" }],
       usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 3, totalTokenCount: 5 } } });
   const last = sse({ response: { candidates: [{ content: { role: "model", parts: [{ text: "second" }] }, finishReason: "STOP" }],
-    usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 7, totalTokenCount: 12 } } });
+    usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 7, totalTokenCount: 12, cachedContentTokenCount: 0 } } });
   const source = fixture({ send: (_sent, index) => stream(index === 1 ? first : last) });
   const decoded = await unpack(await source.invoke());
   expect(decoded.raw).toContain("first");
@@ -306,7 +321,7 @@ test("carries one prepared envelope through every continuation segment under the
   expect(source.seen.sent[1].continuationToken).toBe("private-next-token");
   expect(source.seen.sent[1].handle).toBe(source.seen.sent[0].handle);
   expect(source.seen.sent[1].accessToken).toBe(source.seen.sent[0].accessToken);
-  expect(source.seen.usage[0].usage).toEqual({ input: 7, output: 10, cacheRead: 0, cacheWrite: 0 });
+  expect(source.seen.usage[0].usage).toEqual({ input: 6, output: 10, cacheRead: 1, cacheWrite: 0 });
 });
 
 test("canceling the response stops a pending raw read and releases the account hold", async () => {

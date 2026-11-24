@@ -20,6 +20,7 @@ let dir;
 let server;
 let gateway;
 let seen;
+let mistralRequest;
 
 beforeAll(async () => {
   registerCustomApi("fixture-native", selected => {
@@ -41,13 +42,23 @@ beforeAll(async () => {
     return new Response(text, { headers: { "content-type": "text/event-stream", "x-account-secret": "must-stay-remote" } });
   } });
   const modelsFile = join(dir, "models.yml");
+  const model = { id: "deepseek-v4-1-flash-1017", name: "Mistral DeepSeek fixture", reasoning: true,
+    input: ["text"], contextWindow: 8192, maxTokens: 1024,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
   await writeFile(modelsFile, JSON.stringify({ providers: { fixture: {
     api: "openai-completions", baseUrl: `http://127.0.0.1:${server.port}/v1`, apiKey: "fixture-credential-only-on-server",
     models: [{ id: "demo", name: "Fixture", reasoning: false, input: ["text"], contextWindow: 8192, maxTokens: 1024,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
-  } } }));
+  }, mistral: { api: "openai-completions", baseUrl: "https://api.mistral.ai/v1",
+    apiKey: "fixture-mistral-key", models: [model] } } }));
   gateway = await createRemoteGateway({ version: 1, authDatabase: join(dir, "auth.db"), modelsFile,
-    discovery: "offline", aliases: { friendly: "fixture/demo" } }, { fetch,
+    discovery: "offline", aliases: { friendly: "fixture/demo" } }, {
+    async fetch(input, init) {
+      if (String(input) !== "https://api.mistral.ai/v1/chat/completions") return fetch(input, init);
+      const request = new Request(input, init);
+      mistralRequest = { headers: request.headers, body: await request.json() };
+      return new Response(text, { headers: { "content-type": "text/event-stream" } });
+    },
     routingFactory({ storage, dispatch }) {
       storage.keys.setRuntime("fallback", "fixture-native-key");
       const model = buildModel({ api: "fixture-native", provider: "fallback", id: "native", name: "Native fixture",
@@ -66,7 +77,8 @@ afterAll(async () => { await gateway?.close(); unregisterCustomApis("zproxy-remo
 describe("official remote OMP gateway", () => {
   test("uses server models and credentials, then hands off the original upstream body", async () => {
     const response = await gateway.handle(new Request("http://private/v1/chat/completions", { method: "POST", headers,
-      body: JSON.stringify({ model: "friendly", messages: [{ role: "user", content: "hello" }], stream: true }) }));
+      body: JSON.stringify({ model: "friendly", messages: [{ role: "user", content: "hello" }], stream: true,
+        metadata: { call_source: "vibe_code", call_type: "main_call" } }) }));
     const bytes = new Uint8Array(await response.arrayBuffer());
     expect(response.status).toBe(200);
     expect(response.headers.get("x-zproxy-decode")).toBe("1");
@@ -79,8 +91,36 @@ describe("official remote OMP gateway", () => {
     expect(seen.auth).toBe("Bearer fixture-credential-only-on-server");
     expect(seen.body.model).toBe("demo");
     expect(seen.body.stream).toBe(true);
+    expect(seen.body.stream_options).toEqual({ include_usage: true });
+    expect(seen.body).not.toHaveProperty("metadata");
     expect(seen.headers.has("x-zproxy-user-id")).toBe(false);
     expect(response.headers.has("x-account-secret")).toBe(false);
+  });
+
+  test("sends DeepSeek through Mistral's streaming format with server credentials", async () => {
+    const response = await gateway.handle(new Request("http://private/v1/chat/completions", { method: "POST",
+      headers: { ...headers, "user-agent": "caller-ua", authorization: "Bearer caller-key" },
+      body: JSON.stringify({ model: "mistral/deepseek-v4-1-flash-1017", stream: true,
+        messages: [{ role: "user", content: "hello" }],
+        tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }] }) }));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain(text);
+    expect(mistralRequest.headers.get("authorization")).toBe("Bearer fixture-mistral-key");
+    expect(mistralRequest.headers.get("user-agent")).toBe("mistral-client-python/Mistral-Vibe/3.1.3");
+    expect(mistralRequest.body).toMatchObject({ model: "deepseek-v4-1-flash-1017", stream: true,
+      messages: [{ role: "user", content: "hello" }], parallel_tool_calls: true,
+      tools: [{ type: "function", function: { name: "lookup" } }] });
+    expect(mistralRequest.body).not.toHaveProperty("stream_options");
+    expect(mistralRequest.body.metadata).toEqual({ call_source: "vibe_code", call_type: "main_call" });
+  });
+
+  test("preserves caller-supplied Vibe attribution on the official Mistral endpoint", async () => {
+    const metadata = { call_source: "vibe_code", call_type: "secondary_call", client_version: "3.1.3", session_id: "fixture-session" };
+    const response = await gateway.handle(new Request("http://private/v1/chat/completions", { method: "POST", headers,
+      body: JSON.stringify({ model: "mistral/deepseek-v4-1-flash-1017", stream: true,
+        messages: [{ role: "user", content: "hello" }], metadata }) }));
+    expect(await response.text()).toContain(text);
+    expect(mistralRequest.body.metadata).toEqual(metadata);
   });
 
   test("normalizes legacy completions before the official parser", async () => {

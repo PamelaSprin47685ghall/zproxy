@@ -36,11 +36,29 @@ func zproxySessionTurn(texts ...string) antigravity.GenerateRequest {
 	return request
 }
 
-// zproxySessionBranch returns a two message history whose answer differs from
-// every other branch. The official begin rule keeps a session only when the
-// request continues its chain, so two branches need two sessions.
+// zproxySessionBranch returns a history that differs from every other branch
+// from its first message, so the official rewind rule cannot reuse it.
 func zproxySessionBranch(answer string) antigravity.GenerateRequest {
-	return zproxySessionTurn("hello", answer)
+	return zproxySessionTurn(answer, "hello")
+}
+
+func TestZProxySessionsAllowRewindAtLimit(t *testing.T) {
+	sessions, err := newZProxySessions(t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := sessions.Begin(zproxySessionTurn("hello", "one", "again"), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revised := zproxySessionTurn("hello", "two", "again")
+	next, err := sessions.Begin(revised, "alice")
+	if err != nil || next.New || next.Cascade != first.Cascade {
+		t.Fatalf("rewind at the limit did not reuse its session: %+v %v", next, err)
+	}
+	if _, err := sessions.Begin(revised, "bob"); !errors.Is(err, ErrZProxySessionsFull) {
+		t.Fatalf("rewind crossed scopes at the limit: %v", err)
+	}
 }
 
 // zproxySessionFiles returns the stored session files in dir.

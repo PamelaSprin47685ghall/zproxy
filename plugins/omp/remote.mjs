@@ -19,6 +19,7 @@ import { createPassthrough } from "./remote-passthrough.mjs";
 import { createAgWorker } from "./ag-worker.mjs";
 import { acquireProviderOptIn } from "./remote-opt-in.mjs";
 import { ipcResponse } from "./ipc-response.mjs";
+import { sanitizeDirectResponse } from "./router/direct-guard.mjs";
 
 const PATHS = new Set(["/v1/chat/completions", "/v1/completions"]);
 const HEADER_NAMES = ["content-type", "cache-control", "retry-after", "x-zproxy-decode"];
@@ -26,6 +27,27 @@ const CONFIG_KEYS = new Set(["version", "authDatabase", "modelsFile", "modelCach
   "disabledProviders", "discovery", "refreshMs", "headerTimeoutMs", "idleTimeoutMs", "maxRequestBytes",
   "accountPolicies", "defaultReservePct", "shimsConfig", "passthroughProviders", "antigravity2api"]);
 const utf8 = new TextEncoder();
+
+function applyMistralRequestOptions({ model, options, parsed }) {
+  if (model.provider !== "mistral" || model.api !== "openai-completions") return;
+  if (model.baseUrl.replace(/\/+$/, "") !== "https://api.mistral.ai/v1") return;
+  // Mistral supplies final SSE usage without the OpenAI stream_options extension.
+  const previous = options.onPayload;
+  options.onPayload = async (payload, selected) => {
+    const outgoing = await previous?.(payload, selected) ?? payload;
+    delete outgoing.stream_options;
+    // The OpenAI serializer omits metadata; Mistral uses it for request attribution.
+    outgoing.metadata = parsed.options.metadata ?? { call_source: "vibe_code", call_type: "main_call" };
+    if (outgoing.tools?.length && outgoing.parallel_tool_calls === undefined) outgoing.parallel_tool_calls = true;
+    return outgoing;
+  };
+  const headers = new Headers(options.headers);
+  // Vibe v3.1.3 sets this header explicitly instead of using the SDK default.
+  if (!headers.has("user-agent") && !new Headers(model.headers).has("user-agent")) {
+    headers.set("user-agent", "mistral-client-python/Mistral-Vibe/3.1.3");
+  }
+  options.headers = Object.fromEntries(headers);
+}
 
 function plain(value, max, label) {
   if (typeof value !== "string" || value.length === 0 || utf8.encode(value).length > max || /[\u0000-\u001f\u007f]/u.test(value)) {
@@ -159,6 +181,7 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
       storage, resolveModel, listModels: () => index.models, excludeProviders: disabled,
       fetch: testFetch,
       rawResponseHandoff(turn) {
+        applyMistralRequestOptions(turn);
         const base = turn.options.fetch ?? chooseFetch(turn.model);
         turn.options.fetch = (input, init) => features.fetch(input, init, base);
         if (features.usesCustomTransport(turn.model)) return undefined;
@@ -231,7 +254,12 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
         }
         const normalized = new Request("http://zproxy-omp/v1/chat/completions", { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
         let result;
-        try { result = await (routing?.dispatch ?? dispatch)(normalized, "private-unix", scope); }
+        try {
+          result = await (routing?.dispatch ?? dispatch)(normalized, "private-unix", scope);
+          // Without the routing layer this is the first boundary a provider
+          // answer crosses. Never let an account-status reply reach the caller.
+          if (!routing) result = await sanitizeDirectResponse(result);
+        }
         catch { result = Response.json({ error: "OMP request failed." }, { status: 502 }); }
         const release = () => { active.delete(controller); request.signal.removeEventListener("abort", onAbort); };
         if (url.pathname === "/v1/completions" && result.ok && result.headers.get("x-zproxy-decode") !== "1") {

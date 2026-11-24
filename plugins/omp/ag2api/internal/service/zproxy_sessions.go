@@ -70,21 +70,20 @@ func newZProxySessions(dir string, limit int) (*ZProxySessions, error) {
 }
 
 // Begin returns the session for request inside scope. It reuses the official
-// chain, reply, and begin rules. The scope enters request.Session as a digest,
+// identity and begin rules. The scope enters request.Session as a digest,
 // so equal requests from different scopes take different sessions without a
 // scope in plain text. A full store returns ErrZProxySessionsFull instead of
 // growing without bound. Account credentials never enter a session, and no
 // error repeats request data or a scope.
 func (s *ZProxySessions) Begin(request antigravity.GenerateRequest, scope string) (ZProxySession, error) {
 	request.Session = zproxyScopedSession(scope, request.Session)
-	digests := chain(request)
-	answers := replies(request)
+	id := identify(request)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.store.zproxyAdmit(digests, s.limit); err != nil {
+	if err := s.store.zproxyAdmit(id, s.limit); err != nil {
 		return ZProxySession{}, err
 	}
-	item, err := s.store.begin(digests, answers)
+	item, err := s.store.begin(id)
 	if err != nil {
 		return ZProxySession{}, err
 	}
@@ -147,32 +146,33 @@ func zproxyTrimDir(dir string, limit int) error {
 // expired sessions first and then rejects the request. The caller holds s.mu,
 // and this method takes the store lock, so begin creates no session this check
 // did not admit.
-func (c *conversations) zproxyAdmit(digests []string, limit int) error {
+func (c *conversations) zproxyAdmit(id identity, limit int) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.items) < limit {
 		return nil
 	}
 	c.sweep()
-	if len(c.items) < limit || c.zproxyReusable(digests) {
+	if len(c.items) < limit || c.zproxyReusable(id) {
 		return nil
 	}
 	return ErrZProxySessionsFull
 }
 
-// zproxyReusable mirrors the accept rule of begin without the answer keys, so
-// a false result means begin would create a session. The caller holds c.mu.
-func (c *conversations) zproxyReusable(digests []string) bool {
-	length := len(digests) - 1
-	for _, item := range c.items {
-		// A record with a length outside the chain cannot match, so skipping
-		// it fails closed instead of indexing out of range.
-		if item.Length < 0 || item.Length >= len(digests) || digests[item.Length] != item.Digest {
-			continue
-		}
-		if item.Length < length || item.Prompt == nil || item.Prompt.Length < item.Length {
+
+// zproxyReusable checks the same match, rewind and anchor paths as begin.
+// The caller holds c.mu.
+func (c *conversations) zproxyReusable(id identity) bool {
+	length := len(id.digests) - 1
+	if c.match(id, func(item *conversation) bool {
+		return length > 1 || item.Length < length || item.Prompt == nil || item.Prompt.Length < item.Length
+	}) != nil {
+		return true
+	}
+	if length > 1 {
+		if item, _ := c.rewind(id.digests); item != nil {
 			return true
 		}
 	}
-	return false
+	return c.anchor(id) != nil
 }

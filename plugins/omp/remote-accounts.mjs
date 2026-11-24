@@ -85,12 +85,30 @@ export function createRemoteAccounts(storage, { activePin = () => undefined } = 
     async refresh(id, { signal, timeoutMs = 10000 } = {}) {
       const row = rows().find(item => String(item.id) === String(id));
       if (!enabled(row) || row.credential.type !== "oauth") return undefined;
-      const deadline = AbortSignal.timeout(timeoutMs);
+      if (signal?.aborted) return undefined;
+      const waitMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 10000;
+      // The official refresh rotates the provider grant and must persist the
+      // replacement. Its signal is the backstop that ends that exchange, so a
+      // caller deadline must not be passed in: aborting after the provider has
+      // consumed the old refresh token discards the new one and leaves later
+      // requests permanently unauthorized.
+      let pending;
       try {
-        await storage.oauth.refresh(row.id, signal ? AbortSignal.any([signal, deadline]) : deadline);
+        pending = Promise.resolve(storage.oauth.refresh(row.id));
+      } catch { return undefined; }
+      let timer;
+      const wait = new Promise(resolve => { timer = setTimeout(() => resolve("timeout"), waitMs); });
+      const cancel = signal
+        ? new Promise(resolve => signal.addEventListener("abort", () => resolve("cancel"), { once: true }))
+        : new Promise(() => {});
+      try {
+        const outcome = await Promise.race([pending.then(() => "done", () => "error"), wait, cancel]);
+        if (outcome !== "done") return undefined;
         const fresh = find(row.provider, row.id);
         return enabled(fresh) ? secretRow(fresh) : undefined;
-      } catch { return undefined; }
+      } finally {
+        clearTimeout(timer);
+      }
     },
     invalidate() { void storage.credentials.poll().catch(() => {}); },
     close() {},

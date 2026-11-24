@@ -112,8 +112,21 @@ export function continueGoogle(response, turn) {
           changed = true;
         }
         if (data.usageMetadata) {
-          segmentUsage = data.usageMetadata;
-          if (earlierUsage) { data.usageMetadata = sumUsage(earlierUsage, segmentUsage); changed = true; }
+          // A later usage frame can omit counters already reported in this
+          // segment. Keep those values before adding completed segments.
+          const current = data.usageMetadata;
+          const previousUsage = segmentUsage;
+          segmentUsage = current;
+          if (previousUsage) {
+            for (const key of COUNTS) {
+              if (current[key] !== undefined || previousUsage[key] === undefined) continue;
+              if (segmentUsage === current) segmentUsage = { ...current };
+              segmentUsage[key] = previousUsage[key];
+              changed = true;
+            }
+          }
+          if (earlierUsage) changed = true;
+          data.usageMetadata = earlierUsage ? sumUsage(earlierUsage, segmentUsage) : segmentUsage;
         }
         yield changed ? Buffer.from(`data: ${JSON.stringify(value)}\n\n`) : bytes;
       }

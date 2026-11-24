@@ -8,12 +8,16 @@
 
 | 项目 | 固定版本 | 依据 |
 | --- | --- | --- |
-| OMP | `18.20.3`，`67ef5342de6c24587fc59a6dbd3a2ab918510541` | [官方源代码](https://github.com/can1357/oh-my-pi/tree/67ef5342de6c24587fc59a6dbd3a2ab918510541) |
+| OMP | `19.0.0`，`57771ae562b9345e0579bceb2d68d585e3e6927e` | [官方源代码](https://github.com/can1357/oh-my-pi/tree/57771ae562b9345e0579bceb2d68d585e3e6927e) |
 | 路由引擎 | 本仓库 `plugins/omp/router`、`plugins/omp/shim`（源自 omp-shims 2.0.0 快照，已重组并自维护） | [功能与默认配置](plugins/omp/shim/config.mjs) |
 | Bun | `1.4.4` | [构建锁文件](../plugins/omp/upstream.lock.json) |
-| Antigravity2API（选配） | `0.1.8`，`d36920f3e178eb6d94a49c0b184947cb7df8b3b1` | [固定源码](https://github.com/Mag1cFall/Antigravity2API/tree/d36920f3e178eb6d94a49c0b184947cb7df8b3b1)、[适配边界](AG2API.md) |
+| Antigravity2API（选配） | `0.1.10`，`d9614e93633dd48f595fdcc90f7fe9ede0086626` | [固定源码](https://github.com/Mag1cFall/Antigravity2API/tree/d9614e93633dd48f595fdcc90f7fe9ede0086626)、[适配边界](AG2API.md) |
 
 构建下载固定提交，检查版本和摘要，再应用有前后摘要检查的 gateway 交接及 opt-in 状态读取补丁。上游源文件变化时，构建失败，不能把旧补丁盲目应用到新版 OMP。补丁不复制 provider 解析器。选配 AG codec 的 Go 适配文件在固定模块内编译，复用原协议包。[补丁实现](../plugins/omp/patch-upstream.mjs)、[Go 构建](../scripts/prepare-ag2api.py)
+
+对 Mistral 官方 `/v1/chat/completions`，出站请求按 [Vibe v3.1.3 的 Mistral 请求构造](https://github.com/mistralai/mistral-vibe/blob/v3.1.3/harness/runtimes/python/python/mistralai_vibe_local_harness/vibe/adapters/mistral.py#L130-L185)省略 OpenAI 专用的 `stream_options`，有工具时默认设置 `parallel_tool_calls: true`。默认 UA 与 [Vibe 的 Mistral 后端](https://github.com/mistralai/mistral-vibe/blob/v3.1.3/vibe/utils/http.py#L285-L298)一致，可用服务端模型配置覆盖，不接受调用方 UA。此规则也适用于 Mistral 托管的 DeepSeek，不影响其他 DeepSeek 供应商。
+
+Mistral 的 `metadata` 是请求体协议的一部分。仅对上述官方端点，未提供 `metadata`（或传入 `null`）时，适配器使用 Vibe 主调用的归因字段 `call_source: "vibe_code"` 和 `call_type: "main_call"`。调用方提供的对象（包括空对象）原样保留，不补写字段。直接重放对照中，丢失归因字段会使已验证的 Vibe 请求得到 `402 billing_api_budget_exhausted`；归因字段可能影响上游用量分类，不代表其他凭据或请求一定有相同结果。
 
 ## 13 项旧功能逐一处理
 

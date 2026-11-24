@@ -88,6 +88,29 @@ export function openAgentDb(dbPath) {
   return openReadonlyDb(dbPath);
 }
 
+/**
+ * Clear every stored block for one provider after a transient refusal.
+ *
+ * The routing layer calls this when a provider answers 402 while its budget
+ * check races concurrent reservations. Opening the database explicitly for
+ * writing keeps this separate from the read-only inspection handle.
+ */
+export async function clearProviderBlocks(dbPath, provider) {
+  if (typeof dbPath !== "string" || typeof provider !== "string" || provider === "") return false;
+  const { Database } = await import("bun:sqlite");
+  let db;
+  try {
+    db = new Database(dbPath);
+    db.exec("PRAGMA busy_timeout = 2000");
+    db.query("DELETE FROM auth_credential_blocks WHERE provider_key LIKE ?").run(`${provider}:%`);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { db?.close(); } catch {}
+  }
+}
+
 /** Return a string, a stringified finite number, or undefined. */
 function identityValue(value) {
   if (typeof value === "string") return value;

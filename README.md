@@ -46,7 +46,7 @@ python3 scripts/smoke-native.py --binary artifacts/linux-x64/ZProxy
 
 ### 可选 OMP 与 AppImage
 
-重插件固定使用 OMP **18.20.3**（`67ef5342de6c24587fc59a6dbd3a2ab918510541`）、Bun **1.4.4** 和 Antigravity2API **0.1.8**（`d36920f3e178eb6d94a49c0b184947cb7df8b3b1`）。路由引擎与宿主桥接（`plugins/omp/router`、`plugins/omp/shim`）由本仓库维护，来源与许可见 [NOTICE-shims.md](plugins/omp/NOTICE-shims.md)。来源、下载校验值在 [upstream.lock.json](plugins/omp/upstream.lock.json)，npm 版本由冻结的 [bun.lock](plugins/omp/bun.lock) 锁定。构建不会跟随上游移动分支；升级须更新固定版本并重新检查交接补丁和 Go 适配层。
+重插件固定使用 OMP **19.0.0**（`57771ae562b9345e0579bceb2d68d585e3e6927e`）、Bun **1.4.4** 和 Antigravity2API **0.1.10**（`d9614e93633dd48f595fdcc90f7fe9ede0086626`）。路由引擎与宿主桥接（`plugins/omp/router`、`plugins/omp/shim`）由本仓库维护，来源与许可见 [NOTICE-shims.md](plugins/omp/NOTICE-shims.md)。来源、下载校验值在 [upstream.lock.json](plugins/omp/upstream.lock.json)，npm 版本由冻结的 [bun.lock](plugins/omp/bun.lock) 锁定。构建不会跟随上游移动分支；升级须更新固定版本并重新检查交接补丁和 Go 适配层。
 
 在已有 NativeAOT 产物基础上，使用 Python 3.11 或更新版本：
 

@@ -2,8 +2,8 @@
   "schema": 1,
   "upstream": {
     "repository": "https://github.com/can1357/oh-my-pi.git",
-    "commit": "f40f335845f0b136453d12fec8d6057011082766",
-    "version": "19.0.1",
+    "commit": "a7135b8f31826c878734388b648f52bed8da436e",
+    "version": "19.1.0",
     "packages": [
       "stats",
       "omptype",
@@ -26,9 +26,9 @@
   },
   "ag2api": {
     "repository": "https://github.com/Mag1cFall/Antigravity2API.git",
-    "commit": "d36920f3e178eb6d94a49c0b184947cb7df8b3b1",
-    "version": "0.1.8",
-    "goModSha256": "b9622326f42f1a7d54c646e23f4f7c12570cdf3673ff6c6a9293e401501f2440",
+    "commit": "d9614e93633dd48f595fdcc90f7fe9ede0086626",
+    "version": "0.1.10",
+    "goModSha256": "b78bc092ba01be86f0c5e609219400390fde997f11a03ee24bd64c92c3005b0b",
     "goSumSha256": "cea27ea3e877673651c332ca73699adc1d0cfef1e5d81a0005a9d3b8cab473df",
     "licenseSha256": "cca76be3b407663a238f51fa8d7740ef8be53fa2d18a99c27d7997c9c0a801e4"
   },
@@ -43,8 +43,8 @@
   },
   "native": {
     "package": "@oh-my-pi/pi-natives-linux-x64",
-    "version": "19.0.1",
-    "integrity": "sha512-AARFjaugklIIVD719sFO1p+M+wiP/KaIt7XFldi19/yvzEmXonUx3kfYtsyiZX21i7rCTM1w4vI6faP4HAOqkA=="
+    "version": "19.1.0",
+    "integrity": "sha512-9wgN6YGvwjkLy6VexOluf2AatpcPrvi8aa3rBHC7rDfDTpYEakl53n1q5RXd9ZX+QLwjtjV6zX+WgwWxEsLPjA=="
   },
   "appImageTool": {
     "version": "1.9.1",

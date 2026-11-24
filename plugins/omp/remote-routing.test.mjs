@@ -292,6 +292,47 @@ test("a direct Antigravity model without a schedulable account is never taken ov
 }, 20000);
 
 
+test("a direct provider 402 is retried once and then kept as 402", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "zproxy-direct-402-"));
+  let gateway;
+  try {
+    const modelsFile = join(folder, "models.yml");
+    await writeFile(modelsFile, JSON.stringify({ providers: { fixture: {
+      api: "openai-completions", baseUrl: "http://fixture.invalid/v1", apiKey: "fixture-key",
+      models: [{ id: "spent", name: "Spent", reasoning: false, input: ["text"],
+        contextWindow: 8192, maxTokens: 1024,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
+    await writeFile(join(folder, "routes.json"), JSON.stringify({ contextWindow: 8192,
+      maxOutputTokens: 1024, peakWindows: [{ from: "00:00", to: "24:00" }], routes: {} }));
+    const shimsConfig = join(folder, "shims.json");
+    await writeFile(shimsConfig, JSON.stringify({ version: 2, stateDbPath: join(folder, "routing.db"),
+      features: { "lazy-router": { enabled: true, routesFile: "routes.json", store: "memory",
+        headerTimeoutMs: 3000 }, "plugin-bridge": { enabled: false },
+      "kiro-credential-sync": { enabled: false } } }));
+    let calls = 0;
+    gateway = await createRemoteGateway({ version: 1, discovery: "offline",
+      authDatabase: join(folder, "auth.db"), modelsFile, shimsConfig,
+      headerTimeoutMs: 1000, idleTimeoutMs: 1000 }, {
+      async fetch() {
+        calls++;
+        return Response.json({ error: { type: "insufficient_quota",
+          message: "add credit at console.mistral.example" } }, { status: 402 });
+      },
+    });
+    const response = await gateway.handle(new Request("http://private/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-zproxy-user-id": "d".repeat(32),
+        "x-zproxy-user-nickname": Buffer.from("Fixture").toString("base64url") },
+      body: JSON.stringify({ model: "fixture/spent", stream: true,
+        messages: [{ role: "user", content: "hello" }] }),
+    }));
+    const text = await response.text();
+    expect(response.status).toBe(402);
+    expect(JSON.parse(text).error.type).toBe("insufficient_quota");
+    expect(calls).toBeGreaterThanOrEqual(2);
+  } finally { await gateway?.close(); await rm(folder, { recursive: true, force: true }); }
+}, 20000);
+
 test("configured rating weights select the upstream model through the gateway", async () => {
   const folder = await mkdtemp(join(tmpdir(), "zproxy-rating-gateway-"));
   const calls = [];

@@ -19,45 +19,8 @@ const QUOTA_STATUS = new Set([401, 402, 403, 429]);
 const MAX_SNIPPET_BYTES = 16 * 1024;
 
 /** A thrown provider failure that names an exhausted account. */
-const QUOTA_ERROR = /quota|resource[_\s-]?exhausted|billing|payment required|retry[_\s-]?delay|maxdelayms|exhausted/i;
+const QUOTA_ERROR = /quota|insufficient[_\s-]?credit|credits?\b|balance|resource[_\s-]?exhausted|billing|payment required|retry[_\s-]?delay|maxdelayms|exhausted/i;
 const CREDENTIAL_ERROR = /unauthorized|forbidden|invalid_grant|credential|api key/i;
-
-/** The provider status carried by a thrown error, or 0. */
-function statusOf(error) {
-  for (const value of [error?.status, error?.statusCode, error?.code]) {
-    const status = Number(value);
-    if (Number.isInteger(status) && status >= 400) return status;
-  }
-  const match = /\b(401|402|403|429)\b/.exec(String(error?.message ?? error));
-  return match ? Number(match[1]) : 0;
-}
-
-/**
- * Replace a thrown provider quota failure with one deterministic client
- * failure. A failure that is not an account-status reply returns undefined so
- * the caller can keep its normal error path.
- *
- * @param {unknown} error
- * @param {{report?: (event: string, detail: object) => void}} [options]
- * @returns {Response | undefined}
- */
-export function sanitizeDirectError(error, { report = () => {} } = {}) {
-  const status = statusOf(error);
-  const text = String(error?.message ?? error);
-  const quota = QUOTA_STATUS.has(status) || QUOTA_ERROR.test(text);
-  const credential = status === 401 || status === 403 || CREDENTIAL_ERROR.test(text);
-  if (!quota && !credential) return undefined;
-  report("direct upstream quota error sanitized", { status });
-  return Response.json(
-    {
-      error: {
-        type: "lazy_router_unavailable",
-        message: "no healthy candidate could serve this request",
-      },
-    },
-    { status: 503, headers: { "cache-control": "no-store" } },
-  );
-}
 
 /** Read at most MAX_SNIPPET_BYTES from a cloned body. */
 async function readSnippet(response) {
@@ -85,6 +48,46 @@ async function readSnippet(response) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** The provider status carried by a thrown error, or 0. */
+function statusOf(error) {
+  for (const value of [error?.status, error?.statusCode, error?.code]) {
+    const status = Number(value);
+    if (Number.isInteger(status) && status >= 400) return status;
+  }
+  const match = /\b(401|402|403|429)\b/.exec(String(error?.message ?? error));
+  return match ? Number(match[1]) : 0;
+}
+
+/**
+ * Replace a thrown provider quota failure with one deterministic client
+ * failure. A failure that is not an account-status reply returns undefined so
+ * the caller can keep its normal error path.
+ *
+ * @param {unknown} error
+ * @param {{report?: (event: string, detail: object) => void}} [options]
+ * @returns {Response | undefined}
+ */
+export function sanitizeDirectError(error, { report = () => {} } = {}) {
+  const status = statusOf(error);
+  const text = String(error?.message ?? error);
+  // A 402 is a real account status. A streaming 200 may only reveal it after
+  // the response has started, so keep it rather than invent a 503.
+  if (status === 402 || /billing_api_budget_exhausted/i.test(text)) return undefined;
+  const quota = QUOTA_STATUS.has(status) || QUOTA_ERROR.test(text);
+  const credential = status === 401 || status === 403 || CREDENTIAL_ERROR.test(text);
+  if (!quota && !credential) return undefined;
+  report("direct upstream quota error sanitized", { status });
+  return Response.json(
+    {
+      error: {
+        type: "lazy_router_unavailable",
+        message: "no healthy candidate could serve this request",
+      },
+    },
+    { status: 503, headers: { "cache-control": "no-store" } },
+  );
+}
+
 /**
  * Replace a provider quota body with one deterministic client failure.
  * Any other response passes through untouched.
@@ -95,16 +98,23 @@ async function readSnippet(response) {
  */
 export async function sanitizeDirectResponse(response, { report = () => {} } = {}) {
   if (!(response instanceof Response)) return response;
+  // A 402 is the provider's real account status. The direct caller retries it
+  // once; the guard must not replace it with a synthetic 503.
+  if (response.status === 402) return response;
+  // The local decoder owns this private envelope. Its bytes are not OpenAI SSE.
+  if (response.headers.get("x-zproxy-decode") === "1") return response;
   if (response.status === 200 && (response.headers.get("content-type") ?? "").includes("text/event-stream")) {
     return sanitizeDirectStream(response, { report });
   }
   if (!QUOTA_STATUS.has(response.status)) return response;
 
+  // A 402 is the provider saying the account has no credit. A 401, 403, or 429
+  // may also be a local refusal, such as a missing server credential, so those
+  // statuses are replaced only when the body reports exhausted quota.
   let quota = response.status === 402;
   if (!quota) {
     const type = response.headers.get("content-type") ?? "";
     if (!type.includes("text/event-stream")) {
-      // Inspect a clone so a non-quota response stays readable for the client.
       quota = quotaWording(await readSnippet(response.clone()));
     }
   }
@@ -183,7 +193,11 @@ async function sanitizeDirectStream(response, { report }) {
           continue;
         }
         if (parsed?.error) {
-          const safe = sanitizeDirectError(new Error(parsed.error.message ?? ""), { report });
+          const error = Object.assign(
+            new Error(`${parsed.error.type ?? ""} ${parsed.error.message ?? ""}`),
+            { status: parsed.error.code ?? parsed.error.status },
+          );
+          const safe = sanitizeDirectError(error, { report });
           if (safe) {
             await reader.cancel().catch(() => {});
             return safe;

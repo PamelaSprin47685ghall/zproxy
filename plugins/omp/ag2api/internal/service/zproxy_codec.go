@@ -130,7 +130,7 @@ func (out *ZProxyOutput) Decode(ctx context.Context, source io.ReadCloser, limit
 		if writeError = emit(event); writeError != nil {
 			cancel()
 		}
-	}, out.state, deadline)
+	}, out.state, deadline, closeSource)
 	if writeError != nil {
 		err = writeError
 	} else if ctx.Err() != nil {

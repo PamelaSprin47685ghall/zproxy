@@ -83,7 +83,7 @@ def decode(path):
     first = frame({"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "Hello"}]}}]}})
     terminal = frame({"response": {
         "candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "STOP"}],
-        "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1, "totalTokenCount": 3},
+        "usageMetadata": {"promptTokenCount": 2, "cachedContentTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 3},
     }})
     connection = WorkerConnection(path)
     try:
@@ -122,6 +122,8 @@ def decode(path):
                 events.append(json.loads(line[6:]))
         require(all("error" not in event for event in events), "The AG2API stream ended with an error.")
         require(any((event.get("usage") or {}).get("total_tokens") == 3 for event in events), "The AG2API output lost usage.")
+        require(any((event.get("usage") or {}).get("prompt_tokens_details", {}).get("cached_tokens") == 1
+                    for event in events), "The AG2API output lost cached input tokens.")
         require(any(choice.get("finish_reason") == "stop" for event in events for choice in event.get("choices", [])),
                 "The AG2API output lost its finish reason.")
     finally:

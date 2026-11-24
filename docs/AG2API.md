@@ -4,7 +4,7 @@ AG 适配属于可选 OMP 重插件。`remote.json` 的 `antigravity2api: true` 
 
 ## 为什么使用薄 Go worker
 
-固定源为 [Antigravity2API 0.1.8 / d36920f](https://github.com/Mag1cFall/Antigravity2API/tree/d36920f3e178eb6d94a49c0b184947cb7df8b3b1)，使用 MIT 许可。原 `serve` 程序会创建自己的账户存储、令牌刷新、账号调度、管理服务和数据库；指定账户也仍会经过其并发、冷却与重试策略。其生成客户端还会在远端解码并保存响应。这些行为与本项目的远端共享账户、本地解析边界不同。
+固定源为 [Antigravity2API 0.1.10 / d9614e9](https://github.com/Mag1cFall/Antigravity2API/tree/d9614e93633dd48f595fdcc90f7fe9ede0086626)，使用 MIT 许可。原 `serve` 程序会创建自己的账户存储、令牌刷新、账号调度、管理服务和数据库；指定账户也仍会经过其并发、冷却与重试策略。其生成客户端还会在远端解码并保存响应。这些行为与本项目的远端共享账户、本地解析边界不同。
 
 我们将 [ag2api](../plugins/omp/ag2api) 中的适配文件加入固定上游模块，复用它现有的请求解析、请求组合、官方网络客户端、输出规则与响应解码器。这些包是 Go `internal` 包，因此适配文件必须在该模块内编译，且不能用未经适配的官方可执行文件直接替换。源码中的原文件不被覆盖；账户选择和凭据刷新仍由 OMP 完成，不启动上游的账户池或管理服务。[构建脚本](../scripts/prepare-ag2api.py)
 
@@ -29,6 +29,8 @@ AG 适配属于可选 OMP 重插件。`remote.json` 的 `antigravity2api: true` 
 
 ## 行为与资源边界
 
+只有远端 AG worker 从 [上游规则源](https://api.github.com/repos/Mag1cFall/Antigravity2API/contents/rules/rejected.txt?ref=main)同步 `rejected.txt`。启动后立即检查，此后每小时检查；GET 不带账号凭据或请求内容。更新经官方解析器校验，最大 1 MiB，不接受降版；成功后原子写入远端 `antigravity/rejected.txt` 并交给官方组合器。失败时沿用最后一份有效规则，首次离线则用内置规则。本地解码 worker 不联网同步。
+
 AG 模型的公开选择、可用档位和 wire profile 来自选中账户的 OMP 目录；远端 Go 客户端还读取该账户的官方目录并校验选中的模型。不会用另一个账户的 profile；路由仍由 OMP 负责。设备资料保存在远端私有 `ag-devices.json`，官方客户端会话状态保存在同目录的 `antigravity` 子目录。工具定义、历史、参数、工具名称修复、stop、JSON/schema 输出、usage 和 finish reason 复用固定上游规则。`reasoning_effort: "none"` 对必须思考的模型隐藏思考输出；只有 OMP 目录明确允许关闭的模型才设置零思考预算和关闭输出思考。
 
 上游把 `systemInstruction` 当 user 角色读取。客户端身份句放在这里时，上游会以不带 `reason` 的 429 拒绝整个请求；本机官方实例的 `requests.db` 记录了它在同一份请求上收到同样的 429。因此适配层不再把调用方 system 拼进官方系统提示：`system` 是官方 full 档模板的原样渲染（与官方客户端一致），调用方 system 移到历史最前的一个 user 轮，并包在 `<additional-system-prompt>` 中。官方组合器其余部分仍逐字复用固定上游实现，`dropBilling` 与 user 轮的 `userRejected` 过滤照旧生效。
@@ -40,6 +42,8 @@ AG 的 provider、模型和账户不再使用旧路由中的固定 `maxInFlight`
 私有 Go HTTP 请求、响应同时流动，并通过读写背压衔接。取消会关闭上传与下载、终止解码并回收读取任务；不为慢消费者积累无界事件队列。每次原请求最多 64 MiB，原始下行最多 128 MiB，累计解码内容最多 16 MiB。显式 `--omp-reasoning-order` 的可见输出缓冲另限 16 MiB。非流式结果和原库的输出状态仍会占内存，这不是常数 RSS 的承诺。
 
 本地沿用原输出层的 120 秒事件等待期限：只收到 SSE 注释心跳而没有新的模型事件，不会重置这项期限。它独立于远端按原始字节计时的 `idleTimeoutMs`；调高远端设置不会延长本地这项等待。
+
+同一个续传段内，后续用量帧省略的计数沿用该段已报告的值，然后再汇总各段。这样，末帧只更新输出用量时，不会把已报告的缓存命中数抹掉。流式客户端须使用 `stream_options.include_usage: true` 才会收到 `usage.prompt_tokens_details.cached_tokens`；这个字段只报告上游提供的命中数，不代表代理能保证缓存命中。
 
 签名缓存最多 256 条、4 MiB，每条 30 分钟过期，进程结束后清空。匹配项包含原模型名、工具、已有消息前缀和回答指纹；不按账号猜测或跨不相关历史补签。原生工具签名继续保留，私有 `_zproxy_ag` 仅携带匹配的正文/工具签名；远端重新校验引用、内容指纹与 provider family 后使用。普通 provider 的请求会删除这个私有字段。客户端丢弃历史、重写工具 ID、跨客户端继续对话或本地进程重启后，不能保证恢复之前只存在缓存中的签名。[本地签名缓存](../plugins/omp/ag2api/internal/api/zproxy_signatures.go)
 
