@@ -95,7 +95,8 @@ func zproxyReadSignatures(raw []byte, messages []chatMessage, provider string) (
 			}
 			signed.Origins[zproxyOrigin(item.Signature)] = family
 			if family == provider {
-				signed.Calls["reply:"+item.Digest] = item.Signature
+				// The service keys a reply signature by the answer's message position and its answer key.
+				signed.Calls[fmt.Sprintf("reply:%d:%s", item.Index, item.Digest)] = item.Signature
 			}
 		}
 		calls := map[string]bool{}

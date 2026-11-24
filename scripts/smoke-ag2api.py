@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import time
 
-from bundle_support import read_lock
+from bundle_support import PLUGIN
 
 
 def require(condition, message):
@@ -135,9 +135,16 @@ def main():
     parser.add_argument("--binary", required=True, type=Path)
     arguments = parser.parse_args()
     binary = arguments.binary.resolve()
-    lock = read_lock()
+    manifest_path = PLUGIN / "bin/zproxy-ag.bundle.json"
+    recorded = ""
+    if manifest_path.exists():
+        source = json.loads(manifest_path.read_text()).get("source") or {}
+        recorded = source.get("commit", "")
+    if not recorded:
+        stamp = PLUGIN / "vendor/ag2api/SOURCE_COMMIT"
+        recorded = stamp.read_text().strip() if stamp.exists() else ""
     version = subprocess.check_output([binary, "--version"], text=True, timeout=10)
-    require(lock["ag2api"]["commit"] in version, "The codec worker has a different AG2API revision.")
+    require(recorded and recorded in version, "The codec worker does not match its recorded AG2API revision.")
     with tempfile.TemporaryDirectory(prefix="za-") as temporary:
         working = Path(temporary)
         path = working / "codec.sock"

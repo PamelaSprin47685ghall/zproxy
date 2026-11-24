@@ -10,7 +10,22 @@ import subprocess
 import sys
 import tempfile
 
-from bundle_support import ROOT, read_lock, run, sha256
+from bundle_support import ROOT, run, sha256
+
+
+COMMIT_KEYS = ("commit", "ompCommit", "ag2apiCommit")
+
+
+def recorded_commit(*candidates):
+    """Return the first non-empty revision an unpinned build manifest recorded."""
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for key in COMMIT_KEYS:
+            revision = candidate.get(key)
+            if isinstance(revision, str) and revision:
+                return revision
+    return ""
 
 
 def main():
@@ -18,7 +33,6 @@ def main():
     parser.add_argument("--image", required=True, type=Path)
     arguments = parser.parse_args()
     image = arguments.image.resolve()
-    lock = read_lock()
     with tempfile.TemporaryDirectory(prefix="zproxy-image-") as temporary:
         working = Path(temporary)
         run([image, "--appimage-extract"], cwd=working, stdout=subprocess.DEVNULL, timeout=120)
@@ -45,15 +59,18 @@ def main():
         bundle_environment = {**environment, "LD_LIBRARY_PATH": str(appdir / "usr/lib/zproxy/lib")}
         run([launcher, "--help"], env=environment, stdout=subprocess.DEVNULL, timeout=15)
         version = subprocess.check_output([str(bun), "--version"], env=bundle_environment, text=True, timeout=15).strip()
-        if version != lock["bun"]["version"]:
-            raise RuntimeError("The extracted Bun version does not match the lock.")
+        if not version:
+            raise RuntimeError("The extracted Bun reported no version.")
         manifest = json.loads((appdir / "usr/share/zproxy/bundle.json").read_text())
-        if manifest["upstream"]["upstream"]["commit"] != lock["upstream"]["commit"]:
-            raise RuntimeError("The image includes a different OMP source revision.")
+        upstream = manifest.get("upstream") or {}
+        if not recorded_commit(upstream.get("upstream"), upstream):
+            raise RuntimeError("The image manifest lost the OMP source revision.")
         worker = plugin / "bin/zproxy-ag"
-        if (manifest["ag2apiWorker"]["source"] != lock["ag2api"]
-                or manifest["ag2apiWorker"]["workerSha256"] != sha256(worker)):
+        worker_manifest = manifest.get("ag2apiWorker") or {}
+        if worker_manifest.get("workerSha256") != sha256(worker):
             raise RuntimeError("The image includes a different AG2API codec worker.")
+        if not recorded_commit(worker_manifest.get("source"), worker_manifest):
+            raise RuntimeError("The image manifest lost the AG2API source revision.")
         if (plugin / "vendor/ag2api").exists():
             raise RuntimeError("The AG2API source build tree must not enter the image.")
         run([sys.executable, ROOT / "scripts/smoke-ag2api.py", "--binary", worker], env=environment, timeout=60)

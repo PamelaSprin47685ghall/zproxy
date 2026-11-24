@@ -167,8 +167,7 @@ func officialProjectionOK(model api.ZProxyModel) bool {
 		return false
 	}
 	if model.MaxOutputTokens < 1 || model.MaxOutputTokens > 2147483647 ||
-		model.MaxTokens < 1 || model.MaxTokens > 2147483647 ||
-		model.MinThinkingBudget < 0 || model.MinThinkingBudget > 2147483647 {
+		model.MaxTokens < 1 || model.MaxTokens > 2147483647 {
 		return false
 	}
 	switch model.ThinkingLevel {

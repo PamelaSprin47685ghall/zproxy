@@ -25,7 +25,8 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/service"
 )
 
-const upstreamVersion = "d9614e93633dd48f595fdcc90f7fe9ede0086626"
+// upstreamVersion names the fetched Antigravity2API revision; the prepare script sets it at link time.
+var upstreamVersion = "dev"
 const maxRequest = 64 << 20
 const maxRawResponse = 128 << 20
 

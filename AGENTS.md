@@ -95,8 +95,9 @@ Do not add a framework for a single use case.
   separate session-key labels; upgrading must not invalidate existing users.
 - Keep local OMP fetch unable to make network calls. Remote retries and
   continuations must complete under the official server account owner.
-- Source patches must check both pinned input and expected output hashes.
-  Do not silently accept upstream drift or install old global shim middleware.
+- Source patches must match one exact, unique anchor and stay idempotent, so a
+  re-run after upstream moves forward still applies or skips cleanly. Fail on a
+  missing or ambiguous anchor; never install old global shim middleware.
 - The caller owns the final response. A decoder must close the raw response
   or transfer its lifetime to the returned stream, including failure cleanup.
   Upload bodies are single-pass; request plugins must save needed parse context

@@ -26,26 +26,31 @@ python3 scripts/build-appimage.py --binary artifacts/linux-x64/ZProxy
 python3 scripts/smoke-appimage.py --image artifacts/zproxy-omp-linux-x64.AppImage
 ```
 
-`prepare-omp.py` accepts `--source PATH` for an existing checkout at the exact
-pinned OMP commit and `--bun PATH` for the exact pinned Bun version. The build
-uses `upstream.lock.json` and the frozen `bun.lock`; installation scripts are
-disabled. The OMP patch has before/after hash checks. A source change must be
-reviewed and repinned before the patch can be applied. The routing engine and
-host bridge live in this repository (`router/`, `shim/`, `presets/`) and are not
-fetched or patched at build time.
+`prepare-omp.py` fetches the newest OMP default-branch commit and the newest Bun
+release; `upstream.json` names only where each newest revision comes from.
+`--source PATH` and `--bun PATH` use a local checkout or executable instead, and
+their own HEAD or version is what gets recorded. `bun.lock` is a build artifact:
+the prepare script deletes it and lets Bun resolve the newest catalog and
+dependencies without running lifecycle scripts. The OMP patch is idempotent over
+one exact anchor per edit, so it reapplies or skips after upstream moves and fails
+loudly when the anchor disappears. The routing engine and host bridge live in
+this repository (`router/`, `shim/`, `presets/`) and are not fetched or patched
+at build time.
 
-`prepare-ag2api.py` fetches the pinned Antigravity2API commit and Go toolchain,
-checks `go.mod`, `go.sum`, and the upstream license, then adds the new files in
+`prepare-ag2api.py` fetches the newest Antigravity2API commit and the newest
+stable Go toolchain, checks the upstream license, then adds the new files in
 `plugins/omp/ag2api` to that module. It runs the three modified Go packages' tests
-and builds only `cmd/zproxy-ag` with `CGO_ENABLED=0`. It accepts `--source PATH`
-and `--go PATH` for exact pinned local inputs. The image contains the static
-worker, build provenance, and linked module licenses. It does not contain the
-Go SDK, source checkout, caches, or the upstream application and its web UI.
+and builds only `cmd/zproxy-ag` with `CGO_ENABLED=0`, injecting the fetched commit
+through `-ldflags -X`. It accepts `--source PATH` and `--go PATH` for local
+inputs. The image contains the static worker, build provenance, and linked module
+licenses. It does not contain the Go SDK, source checkout, caches, or the upstream
+application and its web UI.
 
-The AppImage tool, its runtime, Bun, and their downloaded notices are verified
-by SHA-256. The optional native OMP package is pinned by npm integrity in the
-lock. Git verifies the fetched OMP commit. The build does not fetch a moving OMP
-branch or run its package lifecycle scripts.
+A downloaded artifact is checked against the checksum its release publishes when
+one exists; a release with no published checksum is still downloaded and recorded
+by tag. The build writes the OMP commit, the AG2API commit, the Bun version, the
+worker summary, and the addon digest that it actually used into `bundle.json`, so
+a later audit reads what ran rather than a separate version table.
 
 ## Contents and use
 

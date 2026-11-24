@@ -5,27 +5,40 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
 import tempfile
 
-from bundle_support import PLUGIN, ROOT, download, read_lock, run, sha256, source_snapshot
+from bundle_support import (PLUGIN, ROOT, download, read_source_commit, read_upstream_config,
+                            resolve_go_latest, run, sha256, source_snapshot)
 
 
 TEST_PACKAGES = ("./cmd/zproxy-ag", "./internal/api", "./internal/service", "./internal/antigravity")
+GO_VERSION = re.compile(r"^go version go(\d+\.\d+(?:\.\d+)?) linux/amd64$")
 
 
 def output(arguments, **options):
     return subprocess.check_output([str(value) for value in arguments], text=True, **options)
 
 
-def prepare_go(pin, cache, supplied):
+def go_version(binary, environment):
+    report = output([binary, "version"], env=environment).strip()
+    matched = GO_VERSION.match(report)
+    if not matched:
+        raise RuntimeError(f"This worker needs a Go toolchain for Linux amd64, not: {report}")
+    if not (binary.parent.parent / "LICENSE").is_file():
+        raise RuntimeError("The Go toolchain license is missing.")
+    return matched.group(1)
+
+
+def prepare_go(spec, cache, supplied):
     if supplied:
         binary = Path(supplied).resolve()
     else:
-        archive = download(pin, cache / f"go{pin['version']}.linux-amd64.tar.gz")
-        target = cache / f"go-{pin['version']}"
+        archive = download(spec, cache / Path(spec["url"]).name)
+        target = cache / f"go-{spec['version']}"
         with tempfile.TemporaryDirectory(prefix="go-source-", dir=cache) as temporary:
             with tarfile.open(archive, "r:gz") as source:
                 source.extractall(temporary, filter="data")
@@ -34,12 +47,10 @@ def prepare_go(pin, cache, supplied):
             (Path(temporary) / "go").rename(target)
         binary = target / "bin/go"
     environment = dict(os.environ, GOTOOLCHAIN="local", GOENV="off", GOROOT=str(binary.parent.parent))
-    expected = f"go version go{pin['version']} linux/amd64"
-    if output([binary, "version"], env=environment).strip() != expected:
-        raise RuntimeError(f"This worker requires Go {pin['version']} for Linux amd64.")
-    if not (binary.parent.parent / "LICENSE").is_file():
-        raise RuntimeError("The Go toolchain license is missing.")
-    return binary
+    version = go_version(binary, environment)
+    if not supplied and version != spec["version"]:
+        raise RuntimeError(f"The downloaded Go toolchain reported {version}, not {spec['version']}.")
+    return binary, version
 
 
 def go_environment(binary, cache):
@@ -59,12 +70,6 @@ def go_environment(binary, cache):
         "GOPRIVATE": "", "GONOPROXY": "", "GONOSUMDB": "", "GOINSECURE": "",
     })
     return environment
-
-
-def check_source(source, pin):
-    for name, key in (("go.mod", "goModSha256"), ("go.sum", "goSumSha256"), ("LICENSE", "licenseSha256")):
-        if sha256(source / name) != pin[key]:
-            raise RuntimeError(f"The pinned AG2API {name} has changed.")
 
 
 def copy_overlay(source, required):
@@ -123,7 +128,7 @@ def dependency_notices(go, source, environment, destination):
             continue
         name, version, directory = line.split("\t")
         if not version:
-            continue  # The main module has its own pinned source and license.
+            continue  # The main module is the fetched source and carries its own license.
         licenses = copy_licenses(Path(directory), destination / "modules" / name)
         records.append({"module": name, "version": version, "licenses": licenses})
     copy_licenses(go.parent.parent, destination / "go")
@@ -138,7 +143,7 @@ def check_static(binary):
         raise RuntimeError("The AG2API codec worker must be a static Linux executable.")
 
 
-def build(go, source, lock, overlay, cache):
+def build(go, source, config, commit, overlay, cache):
     environment = go_environment(go, cache)
     run([go, "test", "-mod=readonly", "-p=2", "-count=1", "-timeout=120s", *TEST_PACKAGES],
         cwd=source, env=environment)
@@ -147,20 +152,21 @@ def build(go, source, lock, overlay, cache):
     with tempfile.TemporaryDirectory(prefix="ag2api-build-", dir=destination) as temporary:
         working = Path(temporary)
         binary = working / "zproxy-ag"
-        run([go, "build", "-mod=readonly", "-p=2", "-trimpath", "-buildvcs=false", "-ldflags=-s -w -buildid=",
+        run([go, "build", "-mod=readonly", "-p=2", "-trimpath", "-buildvcs=false",
+             "-ldflags=-s -w -buildid= -X main.upstreamVersion=" + commit,
              "-o", binary, "./cmd/zproxy-ag"], cwd=source, env=environment)
         check_static(binary)
         run([go, "mod", "verify"], cwd=source, env=environment)
-        check_source(source, lock["ag2api"])
         version = output([binary, "--version"], timeout=10).strip()
-        if lock["ag2api"]["commit"] not in version:
-            raise RuntimeError("The worker version does not include the pinned AG2API commit.")
+        if commit not in version:
+            raise RuntimeError("The worker version does not include the fetched AG2API commit.")
         notices = working / "zproxy-ag-licenses"
         notices.mkdir()
         modules = dependency_notices(go, source, environment, notices)
         manifest = {
             "schema": 1, "target": "linux-amd64", "static": True,
-            "source": lock["ag2api"], "toolchain": lock["go"],
+            "source": {"repository": config["repository"], "commit": commit},
+            "toolchain": {"version": go_version(go, environment)},
             "workerSha256": sha256(binary), "overlaySha256": overlay,
             "licenseSha256": {path.relative_to(notices).as_posix(): sha256(path)
                               for path in sorted(notices.rglob("*")) if path.is_file()},
@@ -178,24 +184,27 @@ def build(go, source, lock, overlay, cache):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", help="Use a checkout at the pinned AG2API commit.")
-    parser.add_argument("--go", help="Use an installed copy of the exact pinned Go toolchain.")
+    parser.add_argument("--source", help="Use a local AG2API checkout instead of the newest upstream one.")
+    parser.add_argument("--go", help="Use an installed Go toolchain instead of the newest stable one.")
     parser.add_argument("--cache", type=Path, default=ROOT / "artifacts/cache")
     parser.add_argument("--prepare-only", action="store_true", help="Prepare sources and Go without building the overlay.")
     arguments = parser.parse_args()
     if os.uname().sysname != "Linux" or os.uname().machine != "x86_64":
         parser.error("The codec bundle target is Linux x86_64.")
-    lock = read_lock()
+    config = read_upstream_config()
     cache = arguments.cache.resolve()
     cache.mkdir(parents=True, exist_ok=True)
-    go = prepare_go(lock["go"], cache, arguments.go)
-    source = source_snapshot(lock["ag2api"], cache, arguments.source, "ag2api")
-    check_source(source, lock["ag2api"])
+    spec = None if arguments.go else resolve_go_latest(config["go"]["downloadIndex"])
+    go, toolchain = prepare_go(spec, cache, arguments.go)
+    source = source_snapshot(config["ag2api"], cache, arguments.source, "ag2api")
+    commit = read_source_commit(source)
+    if not (source / "LICENSE").is_file():
+        raise RuntimeError("The AG2API license is missing.")
     overlay = copy_overlay(source, required=not arguments.prepare_only)
-    print(f"AG2API {lock['ag2api']['version']} source: {source}", flush=True)
-    print(f"Go: {go}", flush=True)
+    print(f"AG2API source {config['ag2api']['repository']} at {commit}: {source}", flush=True)
+    print(f"Go {toolchain}: {go}", flush=True)
     if not arguments.prepare_only:
-        build(go, source, lock, overlay, cache)
+        build(go, source, config["ag2api"], commit, overlay, cache)
 
 
 if __name__ == "__main__":

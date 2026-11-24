@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 
-from bundle_support import PLUGIN, ROOT, download, read_lock, run, sha256
+from bundle_support import PLUGIN, ROOT, download, read_lock, read_source_commit, run, sha256
 
 
 PLATFORM_LIBRARIES = {
@@ -135,13 +135,11 @@ def copy_plugin(destination):
     copy_file(PLUGIN / "bin/zproxy-ag", destination / "bin/zproxy-ag")
 
 
-def checked_ag_worker(lock):
+def checked_ag_worker():
     metadata = PLUGIN / "bin/zproxy-ag.bundle.json"
     if not metadata.is_file():
-        raise RuntimeError("Run scripts/prepare-ag2api.py to build the pinned codec worker first.")
+        raise RuntimeError("Run scripts/prepare-ag2api.py to build the codec worker first.")
     manifest = json.loads(metadata.read_text())
-    if manifest["source"] != lock["ag2api"] or manifest["toolchain"] != lock["go"]:
-        raise RuntimeError("The AG2API codec build has different source or toolchain pins.")
     if not manifest["static"] or manifest["workerSha256"] != sha256(PLUGIN / "bin/zproxy-ag"):
         raise RuntimeError("The AG2API codec binary does not match its build record.")
     overlay = PLUGIN / "ag2api"
@@ -209,15 +207,13 @@ def main():
     if not binary.is_file() or not os.access(binary, os.X_OK):
         parser.error("--binary must be the published NativeAOT executable.")
     lock = read_lock()
-    for name, pin in (("omp", lock["upstream"]), ("ag2api", lock["ag2api"])):
-        marker = PLUGIN / "vendor" / name / "SOURCE_COMMIT"
-        if not marker.is_file() or marker.read_text().strip() != pin["commit"]:
-            script = "prepare-ag2api.py" if name == "ag2api" else "prepare-omp.py"
-            raise RuntimeError(f"Run scripts/{script} for the pinned {name} revision first.")
-    ag_worker = checked_ag_worker(lock)
+    for name, script in (("omp", "prepare-omp.py"), ("ag2api", "prepare-ag2api.py")):
+        if not (PLUGIN / "vendor" / name / "SOURCE_COMMIT").is_file():
+            raise RuntimeError(f"Run scripts/{script} for the newest {name} revision first.")
+    ag_worker = checked_ag_worker()
     bun = PLUGIN / "bin/bun"
-    if output([bun, "--version"]).strip() != lock["bun"]["version"]:
-        raise RuntimeError("The prepared Bun version does not match the lock.")
+    if not bun.is_file():
+        raise RuntimeError("Run scripts/prepare-omp.py to install Bun first.")
     for name in ("remote.mjs", "local.mjs", "node_modules"):
         if not (PLUGIN / name).exists():
             raise RuntimeError(f"The OMP runtime is incomplete: {name}")
@@ -255,7 +251,13 @@ def main():
             "bunSha256": sha256(bun),
             "nativeAddonSha256": {path.name: sha256(path) for path in addons},
             "ag2apiWorker": ag_worker,
-            "upstream": lock,
+            "upstream": {
+                "config": lock,
+                "ompCommit": read_source_commit(PLUGIN / "vendor/omp"),
+                "ompVersion": json.loads((PLUGIN / "vendor/omp/package.json").read_text()).get("version"),
+                "ag2apiCommit": read_source_commit(PLUGIN / "vendor/ag2api"),
+                "bunVersion": output([bun, "--version"]).strip(),
+            },
             "npmLockSha256": sha256(PLUGIN / "bun.lock"),
             "upstreamPatchSha256": sha256(PLUGIN / "patch-upstream.mjs"),
             "sharedLibraries": libraries,

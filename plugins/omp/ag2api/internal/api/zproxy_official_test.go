@@ -495,7 +495,7 @@ func TestZProxyOfficialPrepareSendsTheOfficialSessionFields(t *testing.T) {
 	if !turn.Anchor.Equal(anchor) {
 		t.Fatal("the new conversation must anchor on the trajectory start")
 	}
-	if len(turn.Sections) != len(antigravity.SessionSections) {
+	if len(turn.Sections) != len(antigravity.SessionSections(model)) {
 		t.Fatalf("section token counts must follow the official sections: %d", len(turn.Sections))
 	}
 	want := service.ZProxySectionTokens(model, turn.Conversation.CascadeID, device, fake.plugins, fake.experiments)

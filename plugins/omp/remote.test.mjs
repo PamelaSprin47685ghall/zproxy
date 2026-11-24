@@ -180,7 +180,7 @@ test("the checked OMP patch is idempotent and rejects drift", async () => {
   expect(await patchUpstream(copy)).toBe(0);
   for (const file of files) {
     await writeFile(join(copy, file), "unexpected upstream source");
-    await expect(patchUpstream(copy)).rejects.toThrow("The pinned OMP source changed");
+    await expect(patchUpstream(copy)).rejects.toThrow("expected exactly one");
     await writeFile(join(copy, file), await readFile(join(source, file)));
   }
   await rm(copy, { recursive: true, force: true });

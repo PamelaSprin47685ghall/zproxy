@@ -1,46 +1,54 @@
 #!/usr/bin/env bun
-// Apply only reviewed source edits to the pinned OMP revision.
-import { createHash } from "node:crypto";
+// Apply the reviewed source edits to whatever OMP revision the snapshot holds.
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+// A marker proves the edit is already present, so a newer OMP that carries it
+// needs no change. Otherwise the anchor must occur exactly once in the file.
 const patches = [
   {
     "path": "packages/ai/src/registry/oauth/index.ts",
-    "before": "5784b6dbcd4aebc853295c67e3a0a24d0d430455629e108fc05ef0afeb81d303",
-    "after": "fa45b632ee3a435cff4d3df0d161e8d10ae2ea6c1bc15e2d190006aad3ef23e5",
-    "old": "/**\n * Turns paused providers back on:",
-    "new": "/** zproxy: read a copy so server opt-in leases preserve the user's existing choices. */\nexport function getUnpausedProviders(): ReadonlySet<string> {\n\treturn new Set(unpausedProviders);\n}\n\n/**\n * Turns paused providers back on:"
+    "marker": "export function getUnpausedProviders",
+    "anchor": "/**\n * Turns paused providers back on:",
+    "position": "before",
+    "insert": "/** zproxy: read a copy so server opt-in leases preserve the user's existing choices. */\nexport function getUnpausedProviders(): ReadonlySet<string> {\n\treturn new Set(unpausedProviders);\n}\n\n"
   },
   {
     "path": "packages/ai/src/auth-gateway/dispatch.ts",
-    "before": "6b373e075702dba38902bbcbdc8d4fca4bd4d96319b8b18db2864004a9c2a096",
-    "after": "918862b879ac883a8284ab2603d5d325b33acf63f93d860479d2a90050e1f72c",
-    "old": "\t/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */\n\tfetch?: FetchImpl;",
-    "new": "\t/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */\n\tfetch?: FetchImpl;\n\t/** zproxy: server-only raw-response handoff before provider response parsing. */\n\trawResponseHandoff?: (turn: {\n\t\trequest: Request;\n\t\tmodel: Model<Api>;\n\t\tparsed: import(\"./types\").AuthGatewayParsedRequest;\n\t\toptions: import(\"../types\").SimpleStreamOptions;\n\t\tcontroller: AbortController;\n\t\tstream: () => import(\"../types\").AssistantMessageEventStream;\n\t\tsettle: () => void;\n\t\tobserveUsage: (usage: Usage) => void;\n\t}) => Promise<Response | undefined>;"
+    "marker": "rawResponseHandoff?: (",
+    "anchor": "\t/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */\n\tfetch?: FetchImpl;",
+    "position": "after",
+    "insert": "\n\t/** zproxy: server-only raw-response handoff before provider response parsing. */\n\trawResponseHandoff?: (turn: {\n\t\trequest: Request;\n\t\tmodel: Model<Api>;\n\t\tparsed: import(\"./types\").AuthGatewayParsedRequest;\n\t\toptions: import(\"../types\").SimpleStreamOptions;\n\t\tcontroller: AbortController;\n\t\tstream: () => import(\"../types\").AssistantMessageEventStream;\n\t\tsettle: () => void;\n\t\tobserveUsage: (usage: Usage) => void;\n\t}) => Promise<Response | undefined>;"
   },
   {
     "path": "packages/ai/src/auth-gateway/server.ts",
-    "before": "c46aa1f0d34f38d16686232a30b5f4bc0ef255e7ade56f6317786d80e777552f",
-    "after": "1807f3707d8c63519ba32b7e8316d5a971cce756c14630aaa88b5dff531b3036",
-    "old": "\tif (!parsed.stream) {\n\t\ttry {\n\t\t\tif (controller.signal.aborted) return clientClosedResponse(route);",
-    "new": "\t// zproxy owns only the successful raw body. OMP still shapes requests and resolves credentials.\n\tif (bootOpts.rawResponseHandoff) {\n\t\tconst clientHold = bootOpts.client?.retain();\n\t\tlet released = false;\n\t\tconst settle = (): void => {\n\t\t\tif (released) return;\n\t\t\treleased = true;\n\t\t\tlease.release();\n\t\t\tclientHold?.();\n\t\t};\n\t\ttry {\n\t\t\tconst raw = await bootOpts.rawResponseHandoff({\n\t\t\t\trequest: req, model, parsed, options: streamOpts, controller,\n\t\t\t\tstream: () => streamSimple(model, parsed.context, streamOpts),\n\t\t\t\tsettle,\n\t\t\t\tobserveUsage: usage => recordGatewayUsage(bootOpts.storage, model, client, usage),\n\t\t\t});\n\t\t\tif (raw !== undefined) return raw;\n\t\t\t// A transport with no fetch seam keeps the complete official gateway path.\n\t\t\tclientHold?.();\n\t\t} catch (error) {\n\t\t\tsettle();\n\t\t\tthrow error;\n\t\t}\n\t}\n\n\tif (!parsed.stream) {\n\t\ttry {\n\t\t\tif (controller.signal.aborted) return clientClosedResponse(route);"
+    "marker": "bootOpts.rawResponseHandoff",
+    "anchor": "\tif (!parsed.stream) {\n\t\ttry {\n\t\t\tif (controller.signal.aborted) return clientClosedResponse(route);",
+    "position": "before",
+    "insert": "\t// zproxy owns only the successful raw body. OMP still shapes requests and resolves credentials.\n\tif (bootOpts.rawResponseHandoff) {\n\t\tconst clientHold = bootOpts.client?.retain();\n\t\tlet released = false;\n\t\tconst settle = (): void => {\n\t\t\tif (released) return;\n\t\t\treleased = true;\n\t\t\tlease.release();\n\t\t\tclientHold?.();\n\t\t};\n\t\ttry {\n\t\t\tconst raw = await bootOpts.rawResponseHandoff({\n\t\t\t\trequest: req, model, parsed, options: streamOpts, controller,\n\t\t\t\tstream: () => streamSimple(model, parsed.context, streamOpts),\n\t\t\t\tsettle,\n\t\t\t\tobserveUsage: usage => recordGatewayUsage(bootOpts.storage, model, client, usage),\n\t\t\t});\n\t\t\tif (raw !== undefined) return raw;\n\t\t\t// A transport with no fetch seam keeps the complete official gateway path.\n\t\t\tclientHold?.();\n\t\t} catch (error) {\n\t\t\tsettle();\n\t\t\tthrow error;\n\t\t}\n\t}\n\n"
   }
 ];
-const digest = text => createHash("sha256").update(text).digest("hex");
 
 export async function patchUpstream(root) {
   const pending = [];
   for (const patch of patches) {
     const path = resolve(root, patch.path);
-    const text = await readFile(path, "utf8");
-    const hash = digest(text);
-    if (hash === patch.after) continue;
-    if (hash !== patch.before || text.split(patch.old).length !== 2) {
-      throw new Error(`The pinned OMP source changed: ${patch.path}`);
+    let text;
+    try {
+      text = await readFile(path, "utf8");
+    } catch {
+      throw new Error(`The OMP source has no ${patch.path}.`);
     }
-    const changed = text.replace(patch.old, patch.new);
-    if (digest(changed) !== patch.after) throw new Error("The OMP patch did not match its checked output.");
+    if (text.includes(patch.marker)) continue;
+    const matches = text.split(patch.anchor).length - 1;
+    if (matches !== 1) {
+      throw new Error(
+        `${patch.path} has ${matches} matches for ${JSON.stringify(patch.anchor)}; expected exactly one. Update patch-upstream.mjs for the current OMP source.`,
+      );
+    }
+    const changed = patch.position === "before"
+      ? text.replace(patch.anchor, () => patch.insert + patch.anchor)
+      : text.replace(patch.anchor, () => patch.anchor + patch.insert);
     pending.push([path, changed]);
   }
   for (const [path, text] of pending) await writeFile(path, text);

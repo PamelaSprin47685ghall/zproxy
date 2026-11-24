@@ -420,7 +420,7 @@ func (r *officialRuntime) open(handle string, device antigravity.Device, source 
 	})
 	ctx, timeout := context.WithTimeout(watch, r.timeout)
 	defer timeout()
-	companion, initialization, bootErr := r.boot(ctx, watch, client)
+	companion, _, bootErr := r.boot(ctx, watch, client)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		account.close()
 		if errors.Is(ctxErr, context.DeadlineExceeded) {
@@ -432,12 +432,8 @@ func (r *officialRuntime) open(handle string, device antigravity.Device, source 
 		account.close()
 		return nil, officialBootFailure(bootErr)
 	}
-	// The official cold start already read the directory, and a later
-	// official read may have replaced it meanwhile. Keep that newer catalog
-	// when the initialization carries none.
-	if len(initialization.Catalog.Models) != 0 {
-		account.setCatalog(initialization.Catalog)
-	}
+	// The official cold start records the directory without notifying the
+	// observer, and a later official read replaces it.
 	if companion != nil {
 		go companion.Run(watch)
 	}

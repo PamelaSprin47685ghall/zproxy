@@ -68,7 +68,7 @@ python3 scripts/smoke-omp.py --binary artifacts/linux-x64/ZProxy \
   --omp-dir plugins/omp --antigravity2api
 ```
 
-构建固定 Go 1.27.4，验证上游提交、模块文件摘要、`go.sum` 与许可证，再测试新增的 API、service、worker 三个包。AppImage 包含 worker 与实际链接模块的许可，不包含 Go SDK、构建缓存或原项目完整程序。`bundle.json` 记录上游、适配文件、工具链和二进制摘要。[来源锁定](../plugins/omp/upstream.lock.json)、[打包说明](../packaging/README.md)
+构建取样 Antigravity2API 默认分支最新提交与最新稳定 Go，验证许可证与 `go.sum`，把实际提交通过 `-ldflags -X` 注入 worker，再测试新增的 API、service、worker 三个包。AppImage 包含 worker 与实际链接模块的许可，不包含 Go SDK、构建缓存或原项目完整程序。`bundle.json` 记录实际取样的上游提交、适配文件、工具链版本和二进制摘要，没有单独的固定版本表。[来源配置](../plugins/omp/upstream.json)、[打包说明](../packaging/README.md)
 
 测试使用自有内存和 loopback 上游，覆盖工具与正文签名、provider 隔离、真实 OMP 账户限制、错误/取消、上下行双工、流式和非流式响应。NativeAOT smoke 在主 chat 流尚未结束时让六个 legacy 请求同时到达上游，并继续验证下一轮正文签名、原始字节统计和全部子进程退出。CI 在实际 AppImage 解包后再次运行这条流程，隐藏主机 Bun、Go 和 .NET 命令。
 

@@ -4,9 +4,8 @@
   "private": true,
   "type": "module",
   "engines": {
-    "bun": ">=1.4.4"
+    "bun": ">=1.0.0"
   },
-  "packageManager": "bun@1.4.4",
   "workspaces": {
     "packages": [
       "vendor/omp/packages/stats",
@@ -28,18 +27,18 @@
       "@babel/traverse": "^7.29.7",
       "@babel/types": "^7.29.7",
       "@napi-rs/cli": "3.7.2",
-      "@oh-my-pi/omp-stats": "19.1.0",
-      "@oh-my-pi/omptype": "19.1.0",
-      "@oh-my-pi/pi-agent-core": "19.1.0",
-      "@oh-my-pi/pi-ai": "19.1.0",
-      "@oh-my-pi/pi-catalog": "19.1.0",
-      "@oh-my-pi/pi-coding-agent": "19.1.0",
-      "@oh-my-pi/pi-mnemopi": "19.1.0",
-      "@oh-my-pi/pi-natives": "19.1.0",
-      "@oh-my-pi/pi-tui": "19.1.0",
-      "@oh-my-pi/pi-utils": "19.1.0",
-      "@oh-my-pi/pi-wire": "19.1.0",
-      "@oh-my-pi/snapcompact": "19.1.0",
+      "@oh-my-pi/omp-stats": "*",
+      "@oh-my-pi/omptype": "*",
+      "@oh-my-pi/pi-agent-core": "*",
+      "@oh-my-pi/pi-ai": "*",
+      "@oh-my-pi/pi-catalog": "*",
+      "@oh-my-pi/pi-coding-agent": "*",
+      "@oh-my-pi/pi-mnemopi": "*",
+      "@oh-my-pi/pi-natives": "*",
+      "@oh-my-pi/pi-tui": "*",
+      "@oh-my-pi/pi-utils": "*",
+      "@oh-my-pi/pi-wire": "*",
+      "@oh-my-pi/snapcompact": "*",
       "@opentelemetry/api": "^1.9.1",
       "@opentelemetry/api-logs": "^0.220.0",
       "@opentelemetry/context-async-hooks": "2.9.0",
@@ -80,7 +79,7 @@
   },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "workspace:*",
-    "@oh-my-pi/pi-natives-linux-x64": "19.1.0"
+    "@oh-my-pi/pi-natives-linux-x64": "*"
   },
   "files": [
     "ag-worker.mjs",
@@ -100,9 +99,8 @@
     "remote-routing.mjs",
     "remote.mjs",
     "package.json",
-    "bun.lock",
     "bunfig.toml",
-    "upstream.lock.json",
+    "upstream.json",
     "vendor",
     "node_modules",
     "router",

@@ -28,9 +28,7 @@ type ZProxyModel struct {
 	ThinkingLevel            int    `json:"thinkingLevel,omitempty"`
 	ThinkingDisabled         bool   `json:"thinkingDisabled,omitempty"`
 	ThinkingBudget           *int64 `json:"thinkingBudget,omitempty"`
-	MinThinkingBudget        int64  `json:"minThinkingBudget,omitempty"`
 	SupportsThinking         bool   `json:"supportsThinking,omitempty"`
-	SupportsAdaptiveThinking bool   `json:"supportsAdaptiveThinking,omitempty"`
 	SupportsImages           bool   `json:"supportsImages,omitempty"`
 	SupportsVideo            bool   `json:"supportsVideo,omitempty"`
 }
@@ -62,7 +60,7 @@ func zproxyFamily(provider string) string {
 func (model ZProxyModel) catalog() (antigravity.CatalogModel, error) {
 	if model.ID == "" || len(model.ID) > 256 || strings.ContainsAny(model.ID, "\x00\r\n") || len(model.Model) > 256 ||
 		zproxyFamily(model.ModelProvider) == "" || model.MaxOutputTokens < 1 || model.MaxOutputTokens > 2147483647 ||
-		model.MaxTokens < 1 || model.MaxTokens > 2147483647 || model.MinThinkingBudget < 0 || model.MinThinkingBudget > 2147483647 {
+		model.MaxTokens < 1 || model.MaxTokens > 2147483647 {
 		return antigravity.CatalogModel{}, errors.New("invalid public model")
 	}
 	if model.ThinkingBudget != nil && (*model.ThinkingBudget < -1 || *model.ThinkingBudget > 2147483647) {
@@ -74,8 +72,8 @@ func (model ZProxyModel) catalog() (antigravity.CatalogModel, error) {
 	return antigravity.CatalogModel{
 		ID: model.ID, Model: model.Model, ModelProvider: model.ModelProvider, MaxOutputTokens: model.MaxOutputTokens,
 		MaxTokens: model.MaxTokens, ThinkingLevel: model.ThinkingLevel, ThinkingBudget: model.ThinkingBudget,
-		MinThinkingBudget: model.MinThinkingBudget, SupportsThinking: model.SupportsThinking,
-		SupportsAdaptiveThinking: model.SupportsAdaptiveThinking, SupportsImages: model.SupportsImages, SupportsVideo: model.SupportsVideo,
+		SupportsThinking: model.SupportsThinking,
+		SupportsImages: model.SupportsImages, SupportsVideo: model.SupportsVideo,
 	}, nil
 }
 
@@ -141,6 +139,23 @@ func zproxyPlan(parsed zproxyParsed, projection ZProxyModel, project, session st
 	model, err := projection.catalog()
 	if err != nil {
 		return antigravity.Envelope{}, nil, err
+	}
+	// The service records an origin as the model family plus its catalog ID without a thinking
+	// level, and rejects a saved signature whose recorded origin differs. The capsule keeps only
+	// the family, so widen it here with the model this request targets.
+	if model.ModelProvider == antigravity.ProviderGoogle {
+		base := model.ID
+		for _, level := range []string{"-minimal", "-low", "-medium", "-high", "-xhigh", "-max"} {
+			if strings.HasSuffix(base, level) {
+				base = strings.TrimSuffix(base, level)
+				break
+			}
+		}
+		for signature, origin := range parsed.signed.Origins {
+			if origin == model.ModelProvider {
+				parsed.signed.Origins[signature] = origin + "/" + base
+			}
+		}
 	}
 	prepared, output, err := service.ZProxyPrepare(parsed.generate, model, parsed.signed)
 	if err != nil {

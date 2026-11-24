@@ -1,0 +1,43 @@
+{
+  "schema": 2,
+  "policy": "latest",
+  "upstream": {
+    "repository": "https://github.com/can1357/oh-my-pi.git",
+    "packages": [
+      "stats",
+      "omptype",
+      "agent",
+      "ai",
+      "catalog",
+      "coding-agent",
+      "mnemopi",
+      "natives",
+      "tui",
+      "utils",
+      "wire",
+      "snapcompact"
+    ]
+  },
+  "bun": {
+    "repository": "oven-sh/bun",
+    "asset": "bun-linux-x64-baseline.zip",
+    "minimumVersion": "1.4.4"
+  },
+  "ag2api": {
+    "repository": "https://github.com/Mag1cFall/Antigravity2API.git"
+  },
+  "go": {
+    "downloadIndex": "https://go.dev/dl/?mode=json"
+  },
+  "native": {
+    "package": "@oh-my-pi/pi-natives-linux-x64"
+  },
+  "appImageTool": {
+    "repository": "AppImage/appimagetool",
+    "asset": "appimagetool-x86_64.AppImage"
+  },
+  "appImageRuntime": {
+    "repository": "AppImage/type2-runtime",
+    "asset": "runtime-x86_64"
+  }
+}

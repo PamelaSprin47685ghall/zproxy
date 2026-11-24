@@ -138,9 +138,9 @@ func (out *ZProxyOutput) Decode(ctx context.Context, source io.ReadCloser, limit
 	} else if deadline.timedOut() {
 		err = errors.New("the upstream body stalled")
 	}
-	signed := out.state.signatures()
+	signed := out.state.signed
 	return ZProxySummary{
-		Digest: out.state.reply(), Provider: out.state.provider, Signature: signed.reply, Calls: signed.calls,
+		Digest: answerKey(out.state.answer), Provider: out.state.provider, Signature: signed.reply, Calls: signed.calls,
 		Complete: err == nil && final.Kind == antigravity.EventFinish && final.Err == nil,
 	}, err
 }

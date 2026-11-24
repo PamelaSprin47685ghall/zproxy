@@ -6,14 +6,14 @@
 
 ## 审计基线
 
-| 项目 | 固定版本 | 依据 |
+| 项目 | 版本来源 | 依据 |
 | --- | --- | --- |
-| OMP | `19.0.0`，`57771ae562b9345e0579bceb2d68d585e3e6927e` | [官方源代码](https://github.com/can1357/oh-my-pi/tree/57771ae562b9345e0579bceb2d68d585e3e6927e) |
+| OMP | 构建时取 `oh-my-pi` 默认分支最新提交，实际 commit 写入 `bundle.json` | [官方源代码](https://github.com/can1357/oh-my-pi) |
 | 路由引擎 | 本仓库 `plugins/omp/router`、`plugins/omp/shim`（源自 omp-shims 2.0.0 快照，已重组并自维护） | [功能与默认配置](plugins/omp/shim/config.mjs) |
-| Bun | `1.4.4` | [构建锁文件](../plugins/omp/upstream.lock.json) |
-| Antigravity2API（选配） | `0.1.10`，`d9614e93633dd48f595fdcc90f7fe9ede0086626` | [固定源码](https://github.com/Mag1cFall/Antigravity2API/tree/d9614e93633dd48f595fdcc90f7fe9ede0086626)、[适配边界](AG2API.md) |
+| Bun | 构建时取官方最新发布版 | [Bun 发布](https://github.com/oven-sh/bun/releases) |
+| Antigravity2API（选配） | 构建时取默认分支最新提交，实际 commit 写入 worker manifest | [上游仓库](https://github.com/Mag1fall/Antigravity2API)、[适配边界](AG2API.md) |
 
-构建下载固定提交，检查版本和摘要，再应用有前后摘要检查的 gateway 交接及 opt-in 状态读取补丁。上游源文件变化时，构建失败，不能把旧补丁盲目应用到新版 OMP。补丁不复制 provider 解析器。选配 AG codec 的 Go 适配文件在固定模块内编译，复用原协议包。[补丁实现](../plugins/omp/patch-upstream.mjs)、[Go 构建](../scripts/prepare-ag2api.py)
+构建取样最新上游源码，按唯一精确锚点幂等应用 gateway 交接及 opt-in 状态读取补丁：锚点缺失或出现多次即构建失败并提示需要复核补丁语义，不会把旧补丁盲目套到重构后的文件上。补丁不复制 provider 解析器。选配 AG codec 的 Go 适配文件在取样模块内编译，复用原协议包，构建产物的 manifest 记录本次实际提交与摘要。[补丁实现](../plugins/omp/patch-upstream.mjs)、[Go 构建](../scripts/prepare-ag2api.py)
 
 对 Mistral 官方 `/v1/chat/completions`，出站请求按 [Vibe v3.1.3 的 Mistral 请求构造](https://github.com/mistralai/mistral-vibe/blob/v3.1.3/harness/runtimes/python/python/mistralai_vibe_local_harness/vibe/adapters/mistral.py#L130-L185)省略 OpenAI 专用的 `stream_options`，有工具时默认设置 `parallel_tool_calls: true`。默认 UA 与 [Vibe 的 Mistral 后端](https://github.com/mistralai/mistral-vibe/blob/v3.1.3/vibe/utils/http.py#L285-L298)一致，可用服务端模型配置覆盖，不接受调用方 UA。此规则也适用于 Mistral 托管的 DeepSeek，不影响其他 DeepSeek 供应商。
 

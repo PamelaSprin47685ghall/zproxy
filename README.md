@@ -46,7 +46,7 @@ python3 scripts/smoke-native.py --binary artifacts/linux-x64/ZProxy
 
 ### 可选 OMP 与 AppImage
 
-重插件固定使用 OMP **19.0.0**（`57771ae562b9345e0579bceb2d68d585e3e6927e`）、Bun **1.4.4** 和 Antigravity2API **0.1.10**（`d9614e93633dd48f595fdcc90f7fe9ede0086626`）。路由引擎与宿主桥接（`plugins/omp/router`、`plugins/omp/shim`）由本仓库维护，来源与许可见 [NOTICE-shims.md](plugins/omp/NOTICE-shims.md)。来源、下载校验值在 [upstream.lock.json](plugins/omp/upstream.lock.json)，npm 版本由冻结的 [bun.lock](plugins/omp/bun.lock) 锁定。构建不会跟随上游移动分支；升级须更新固定版本并重新检查交接补丁和 Go 适配层。
+重插件不固定上游版本：每次准备构建时，`scripts/prepare-omp.py` 与 `scripts/prepare-ag2api.py` 取样 OMP、Antigravity2API 的默认分支最新提交，并从各自官方源取最新的 Bun、Go、native addon 与 AppImage 工具。路由引擎与宿主桥接（`plugins/omp/router`、`plugins/omp/shim`）由本仓库维护，来源与许可见 [NOTICE-shims.md](plugins/omp/NOTICE-shims.md)。交接补丁按唯一精确锚点幂等应用，上游一移动就重新校验语义，不会默默套用失效补丁。npm 依赖树随取样源码重新解析，`bun.lock` 在构建时重生成。没有下载摘要固定表；产物把本次实际的 OMP commit、AG2API commit、Bun 版本、worker 与 addon 摘要写入随包的 `bundle.json`，供事后追溯。同一份源码重跑构建结果不变，不同日期取样得到不同上游版本，这是预期行为。
 
 在已有 NativeAOT 产物基础上，使用 Python 3.11 或更新版本：
 

@@ -40,6 +40,7 @@ type officialTestBoot struct {
 	gate    chan struct{}
 	delay   time.Duration
 	answer  antigravity.Initialization
+	catalog *antigravity.Catalog
 	err     error
 }
 
@@ -47,8 +48,12 @@ func (b *officialTestBoot) start(ctx, watch context.Context, client *antigravity
 	b.mu.Lock()
 	b.calls++
 	b.watch = watch
-	answer, failure := b.answer, b.err
+	answer, catalog, failure := b.answer, b.catalog, b.err
 	b.mu.Unlock()
+	if catalog != nil {
+		// The cold start records the directory without notifying the observer.
+		antigravity.ZProxyNotify(client, antigravity.Observed{Catalog: catalog})
+	}
 	if b.entered != nil {
 		select {
 		case b.entered <- struct{}{}:
@@ -78,6 +83,12 @@ func (b *officialTestBoot) start(ctx, watch context.Context, client *antigravity
 func (b *officialTestBoot) setAnswer(answer antigravity.Initialization, err error) {
 	b.mu.Lock()
 	b.answer, b.err = answer, err
+	b.mu.Unlock()
+}
+
+func (b *officialTestBoot) setCatalog(catalog antigravity.Catalog, err error) {
+	b.mu.Lock()
+	b.catalog, b.err = &catalog, err
 	b.mu.Unlock()
 }
 
@@ -441,9 +452,9 @@ func TestOfficialRuntimeColdStartHonorsItsTimeout(t *testing.T) {
 
 func TestOfficialRuntimeAccountKeepsTheOfficialCatalog(t *testing.T) {
 	runtime, _ := officialTestRuntime(t)
-	boot := &officialTestBoot{answer: antigravity.Initialization{Catalog: antigravity.Catalog{Models: map[string]antigravity.CatalogModel{
+	boot := &officialTestBoot{catalog: &antigravity.Catalog{Models: map[string]antigravity.CatalogModel{
 		"models/first": {ID: "first", DisplayName: "First", MaxOutputTokens: 1024},
-	}}}}
+	}}}
 	runtime.boot = boot.start
 	account, err := runtime.get(context.Background(), officialTestHandle("catalog"), officialTestDevice, officialTestToken, 0)
 	if err != nil {
@@ -808,9 +819,9 @@ func TestOfficialRuntimeReportsAFailedColdStartWithoutCachingIt(t *testing.T) {
 		t.Fatalf("a failed cold start returned %v", err)
 	}
 	// The failure keeps no account, so the next call starts again.
-	boot.setAnswer(antigravity.Initialization{Catalog: antigravity.Catalog{Models: map[string]antigravity.CatalogModel{
+	boot.setCatalog(antigravity.Catalog{Models: map[string]antigravity.CatalogModel{
 		"models/retry": {ID: "retry"},
-	}}}, nil)
+	}}, nil)
 	account, err := runtime.get(context.Background(), handle, officialTestDevice, officialTestToken, 0)
 	if err != nil {
 		t.Fatal(err)

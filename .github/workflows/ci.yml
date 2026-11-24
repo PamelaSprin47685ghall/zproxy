@@ -35,10 +35,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y clang libzstd-dev zlib1g-dev libssl-dev desktop-file-utils
 
-      - name: Prepare pinned OMP runtime
+      - name: Prepare the newest OMP runtime
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/prepare-omp.py
 
-      - name: Test and build the pinned AG2API codec worker
+      - name: Test and build the newest AG2API codec worker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/prepare-ag2api.py
 
       - name: Run the AG2API codec socket smoke test
