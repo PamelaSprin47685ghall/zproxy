@@ -35,7 +35,7 @@ module ManagementTests =
                         Directory.Delete(directory, true)
             })
 
-    let private start () = task {
+    let private startWith (routing: (CancellationToken -> Task<string option>) option) = task {
         let directory = Path.Combine(Path.GetTempPath(), "zproxy-management-test-" + Guid.NewGuid().ToString("N"))
         let users = new Users.Store(directory)
         let statistics = new Statistics.Store(directory, users.List)
@@ -44,7 +44,7 @@ module ManagementTests =
         reservation.Start()
         let endpoint = reservation.LocalEndpoint :?> IPEndPoint
         reservation.Stop()
-        let work = Management.run(endpoint, masterPassword, users, statistics, source.Token)
+        let work = Management.run(endpoint, masterPassword, users, statistics, routing, source.Token)
         let running = new Running(directory, endpoint, users, statistics, source, work)
         try
             let mutable ready = false
@@ -62,6 +62,8 @@ module ManagementTests =
             do! (running :> IAsyncDisposable).DisposeAsync()
             return raise error
     }
+
+    let private start () = startWith None
 
     let private newClient () =
         let handler = new SocketsHttpHandler(UseProxy = false, UseCookies = true, AllowAutoRedirect = false)
@@ -101,6 +103,47 @@ module ManagementTests =
         document.RootElement.GetProperty("user").GetProperty("id").GetString(), document.RootElement.GetProperty("uuid").GetString()
 
     [<Fact>]
+    let ``Routing statistics require a session and never replace a failed read with zeros`` () = task {
+        // The bridge answers one shape in every state, so the page can render a
+        // reason instead of a number. A refusal is not an empty report.
+        let summary = """{"schemaVersion":1,"available":true,"reason":null,"metrics":[],"aggregate":{}}"""
+        let calls = ref 0
+        let read (_: CancellationToken) = task {
+            calls.Value <- calls.Value + 1
+            return Some summary }
+        use! running = startWith (Some read)
+        use anonymous = newClient ()
+        use admin = newClient ()
+
+        use! unauthorized = request running anonymous HttpMethod.Get "/admin/api/routing" None None
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode)
+        Assert.Equal(0, calls.Value)
+
+        use! unlocked = login running admin masterPassword
+        Assert.Equal(HttpStatusCode.OK, unlocked.StatusCode)
+
+        // A successful read is forwarded verbatim, with a JSON content type.
+        use! forwarded = request running admin HttpMethod.Get "/admin/api/routing" None None
+        Assert.Equal(HttpStatusCode.OK, forwarded.StatusCode)
+        Assert.Equal("application/json", forwarded.Content.Headers.ContentType.MediaType)
+        let! body = text running forwarded
+        Assert.Equal(summary, body)
+        Assert.Equal(1, calls.Value)
+
+        // A failed read is a stated unavailability, never an empty snapshot.
+        use! failing = startWith (Some(fun _ -> task { return (None: string option) }))
+        use failingAdmin = newClient ()
+        use! failingUnlock = login failing failingAdmin masterPassword
+        Assert.Equal(HttpStatusCode.OK, failingUnlock.StatusCode)
+        use! unavailable = request failing failingAdmin HttpMethod.Get "/admin/api/routing" None None
+        Assert.Equal(HttpStatusCode.OK, unavailable.StatusCode)
+        let! unavailableBody = text failing unavailable
+        use document = JsonDocument.Parse(unavailableBody)
+        Assert.False(document.RootElement.GetProperty("available").GetBoolean())
+        Assert.False(String.IsNullOrWhiteSpace(document.RootElement.GetProperty("reason").GetString()))
+    }
+
+    [<Fact>]
     let ``Admin creates and rotates UUIDs while public reports contain only nickname counters`` () = task {
         use! running = start ()
         use admin = newClient ()
@@ -137,7 +180,17 @@ module ManagementTests =
         Assert.Equal(29L, row.GetProperty("responseBytes").GetInt64())
         let fields = row.EnumerateObject() |> Seq.map (fun field -> field.Name) |> Seq.sort |> Seq.toArray
         Assert.Equal<string>(
-            [| "active"; "canceled"; "durationMs"; "failed"; "nickname"; "requestBytes"; "requests"; "responseBytes"; "succeeded" |], fields)
+            [| "active"; "buffered"; "canceled"; "durationMs"; "failed"; "headersLatency"; "kinds";
+               "lastSeen"; "latency"; "nickname"; "peakActive"; "requestBytes"; "requests";
+               "responseBytes"; "series"; "statusBuckets"; "streamed"; "succeeded" |], fields)
+        let buckets = row.GetProperty("statusBuckets")
+        Assert.Equal(1L, buckets.GetProperty("2xx").GetInt64())
+        Assert.Equal(0L, buckets.GetProperty("noResponse").GetInt64())
+        Assert.Equal(1L, row.GetProperty("kinds").GetProperty("chat").GetInt64())
+        Assert.Equal(1L, row.GetProperty("buffered").GetInt64())
+        Assert.Equal(0L, row.GetProperty("streamed").GetInt64())
+        Assert.Equal(1L, row.GetProperty("peakActive").GetInt64())
+        Assert.False(row.GetProperty("lastSeen").ValueKind = JsonValueKind.Null)
         let credential = Crypto.deriveUserCredential uuid
         for secret in [ uuid; id; masterPassword; Convert.ToHexString(credential.Selector); Convert.ToBase64String(credential.Key) ] do
             Assert.DoesNotContain(secret, publicBody, StringComparison.Ordinal)
@@ -148,7 +201,13 @@ module ManagementTests =
         Assert.DoesNotContain(uuid, html, StringComparison.Ordinal)
         Assert.DoesNotContain(id, html, StringComparison.Ordinal)
         Assert.DoesNotContain("innerHTML", html, StringComparison.Ordinal)
-        Assert.Contains("textContent", html, StringComparison.Ordinal)
+        Assert.Contains("/assets/", html, StringComparison.Ordinal)
+        let start = html.IndexOf("/assets/", StringComparison.Ordinal)
+        let finish = html.IndexOf('"', start)
+        let asset = html.Substring(start, finish - start)
+        use! script = anonymous.GetAsync(Uri(running.BaseUri, asset), running.Token)
+        Assert.Equal(HttpStatusCode.OK, script.StatusCode)
+        Assert.Contains("immutable", script.Headers.CacheControl.ToString(), StringComparison.Ordinal)
         Assert.True(page.Headers.Contains("Content-Security-Policy"))
 
         use! listed = admin.GetAsync(Uri(running.BaseUri, "/admin/api/users"), running.Token)

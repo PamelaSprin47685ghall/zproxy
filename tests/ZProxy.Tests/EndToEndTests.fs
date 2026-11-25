@@ -614,7 +614,17 @@ module EndToEndTests =
             Assert.Equal((if expected = 2L then 30L else 14L), row.GetProperty("responseBytes").GetInt64())
             let fields = row.EnumerateObject() |> Seq.map (fun property -> property.Name) |> Seq.sort |> Seq.toArray
             Assert.Equal<string>(
-                [| "active"; "canceled"; "durationMs"; "failed"; "nickname"; "requestBytes"; "requests"; "responseBytes"; "succeeded" |], fields)
+                [| "active"; "buffered"; "canceled"; "durationMs"; "failed"; "headersLatency"; "kinds";
+                   "lastSeen"; "latency"; "nickname"; "peakActive"; "requestBytes"; "requests";
+                   "responseBytes"; "series"; "statusBuckets"; "streamed"; "succeeded" |], fields)
+            let buckets = row.GetProperty("statusBuckets").EnumerateObject() |> Seq.sumBy (fun field -> field.Value.GetInt64())
+            Assert.Equal(row.GetProperty("succeeded").GetInt64() + row.GetProperty("failed").GetInt64()
+                         + row.GetProperty("canceled").GetInt64(), buckets)
+            let kinds = row.GetProperty("kinds").EnumerateObject() |> Seq.sumBy (fun field -> field.Value.GetInt64())
+            Assert.Equal(row.GetProperty("requests").GetInt64() - row.GetProperty("active").GetInt64(), kinds)
+            let headers = Array.sumBy (fun (count: JsonElement) -> count.GetInt64())
+                                          (row.GetProperty("headersLatency").EnumerateArray() |> Seq.toArray)
+            Assert.True(headers <= buckets)
         for issued in server.Users do
             let credential = Crypto.deriveUserCredential issued.Uuid
             for secret in [ issued.Uuid; issued.User.Id; Convert.ToHexString(credential.Selector)

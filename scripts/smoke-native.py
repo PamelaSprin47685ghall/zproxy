@@ -189,6 +189,14 @@ def run(binary, timeout):
             require(len(content) <= 65536, "The management response exceeded its bound.")
             return response.status, dict(response.getheaders()), content
 
+    def asset(path):
+        """Read a prefix only: the hashed script is larger than the 64 KiB report bound."""
+        with contextlib.closing(http.client.HTTPConnection("127.0.0.1", web_port, timeout=remaining())) as connection:
+            connection.request("GET", path, headers={"Accept-Encoding": "identity"})
+            response = connection.getresponse()
+            prefix = response.read(256)
+            return response.status, dict(response.getheaders()), prefix
+
     def check_response_headers(response):
         for name in ("Authorization", "Set-Cookie", "X-Api-Key", "X-Provider-Account"):
             require(response.getheader(name) is None, "A sensitive gateway response header reached the client.")
@@ -281,12 +289,22 @@ def run(binary, timeout):
             require(origin_errors.empty(), "The origin reported an error.")
             phase = "checking the public per-user report"
             expected_fields = {"nickname", "requests", "succeeded", "failed", "canceled", "active",
-                               "requestBytes", "responseBytes", "durationMs"}
+                               "requestBytes", "responseBytes", "durationMs", "latency", "headersLatency",
+                               "statusBuckets", "kinds", "streamed", "buffered", "peakActive", "lastSeen",
+                               "series"}
+            series_fields = {"hour", "requests", "succeeded", "failed", "canceled",
+                             "requestBytes", "responseBytes", "durationMs"}
+            status_classes = ["2xx", "3xx", "4xx", "5xx", "noResponse"]
             while True:
                 status, _, body = web("GET", "/api/reports")
                 require(status == 200, "The public report required a login.")
                 report = json.loads(body)
-                require(set(report) == {"users"} and len(report["users"]) == 1, "The public report shape changed.")
+                require(set(report) == {"generatedAt", "latencyBoundsMs", "statusClasses", "requestKinds", "users"}
+                        and len(report["users"]) == 1,
+                        "The public report shape changed.")
+                require(report["latencyBoundsMs"] == [100, 500, 1000, 5000, 30000], "The latency bounds changed.")
+                require(report["statusClasses"] == status_classes, "The status classes changed.")
+                require(report["requestKinds"] == ["chat", "completions"], "The request kinds changed.")
                 row = report["users"][0]
                 require(set(row) == expected_fields and row["nickname"] == nickname,
                         "The public report exposed identifiers or lost the nickname.")
@@ -298,8 +316,37 @@ def run(binary, timeout):
             require(row["succeeded"] == 2 and row["failed"] == 0 and row["canceled"] == 0, "The user result counters changed.")
             require(row["requestBytes"] == len(payload) + len(completion_payload), "The user upload count changed.")
             require(row["responseBytes"] == len(first) + len(tail) + len(completion_response), "The user download count changed.")
-            status, _, body = web("GET", "/reports")
-            require(status == 200 and b"textContent" in body and b"innerHTML" not in body, "The public report page is unavailable or unsafe.")
+            require(len(row["latency"]) == 6 and sum(row["latency"]) == 2, "The latency histogram is incomplete.")
+            # Structural invariants: they hold for any mix of outcomes, so they cannot
+            # go stale when the smoke scenario changes.
+            require(sum(row["statusBuckets"][name] for name in status_classes) == 2,
+                    "The status buckets do not cover the completed requests.")
+            require(row["statusBuckets"]["2xx"] == 2, "The successful requests were not classified as 2xx.")
+            require(sum(row["kinds"].values()) == 2, "The request kinds do not cover the requests.")
+            require(len(row["headersLatency"]) == 6 and sum(row["headersLatency"]) == 2,
+                    "The header wait histogram does not cover the responses.")
+            require(row["streamed"] == 1 and row["buffered"] == 1, "The streaming split is wrong.")
+            # The scenario intentionally overlaps the SSE response with a second
+            # request, so the peak must be 2. A peak of 1 would mean the counter
+            # never observed the concurrency this smoke proves.
+            require(row["peakActive"] == 2, "The concurrency peak did not observe the overlapping requests.")
+            require(row["lastSeen"] is not None, "The last activity stamp is missing.")
+            series = row["series"]
+            require(len(series) == 1 and set(series[0]) == series_fields and series[0]["requests"] == 2,
+                    "The hourly series lost the completed requests.")
+            status, page_headers, body = web("GET", "/reports")
+            require(status == 200 and b"/assets/" in body and b'<script type="module"' in body,
+                    "The public report page is unavailable.")
+            require("script-src 'self'" in page_headers.get("Content-Security-Policy", ""),
+                    "The public report page lost its content security policy.")
+            require(b'<link rel="stylesheet" href="/assets/' in body, "The public report page lost its stylesheet.")
+            tag = b'<script type="module" src="'
+            start = body.index(tag) + len(tag)
+            asset_path = body[start:body.index(b'"', start)].decode()
+            require(asset_path.endswith(".js"), "The public report page does not load its script.")
+            asset_status, asset_headers, asset_head = asset(asset_path)
+            require(asset_status == 200 and len(asset_head) > 0, "The embedded status script was not served.")
+            require("immutable" in asset_headers.get("Cache-Control", ""), "The hashed status asset is not immutable.")
             for secret in (user_uuid, user_id, master_password, gateway_token, caller_token):
                 require(secret.encode() not in body, "The public report page exposed a credential or identifier.")
             phase = "stopping the native client"

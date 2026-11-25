@@ -29,6 +29,7 @@
     <Compile Include="Session.fs" />
     <Compile Include="Upstream.fs" />
     <Compile Include="Metering.fs" />
+    <Compile Include="StatusPage.fs" />
     <Compile Include="Management.fs" />
     <Compile Include="Client.fs" />
     <Compile Include="Server.fs" />
@@ -38,6 +39,13 @@
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <!-- The status page is built by scripts/build-status-page.py and committed.
+       Packing it here keeps the published binary free of Bun, Node, and file I/O. -->
+  <ItemGroup>
+    <EmbeddedResource Include="StatusAssets/**/*"
+                      LogicalName="status/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

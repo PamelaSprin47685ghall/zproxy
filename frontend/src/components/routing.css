@@ -1,0 +1,178 @@
+/* Upstream routing: a whole-site section that must never look like a second half
+   of the per-user table. One separator, its own heading scale, no card inside a
+   card, and no grid of equally weighted tiles. */
+
+.routing { border-top-color: var(--border-strong); }
+
+.scope-tag {
+  margin: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.unavailable {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--warn);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+.unavailable strong { color: var(--warn); font-size: 13.5px; }
+.unavailable span { color: var(--muted); font-size: 12.8px; }
+
+.route-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: 0 0 20px;
+  padding: 0 0 16px;
+  border-bottom: 1px dashed var(--border);
+}
+.route-meta > div { display: flex; gap: 7px; align-items: baseline; min-width: 0; }
+.route-meta dt { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.route-meta dd {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.aggregate {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0 0 22px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+/* Separators are drawn on the cells, not by a gap over a dark container, so a
+   partly filled last row leaves panel background instead of an empty slot. */
+.agg-group {
+  flex: 1 1 208px;
+  min-width: 0;
+  padding: 13px 15px 14px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin: 0 -1px -1px 0;
+}
+.agg-group h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 0 0 9px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.agg-scope {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--muted);
+  opacity: 0.8;
+}
+.agg-group dl { margin: 0; display: grid; gap: 6px; }
+.agg-group dl > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 10px;
+}
+.agg-group dt { font-size: 12.2px; color: var(--muted); white-space: nowrap; }
+.agg-group dd {
+  margin: 0;
+  min-width: 0;
+  font-size: 13.2px;
+  font-weight: 600;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.agg-bar {
+  grid-column: 1 / -1;
+  display: block;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.agg-bar > span { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
+
+.metrics { display: grid; gap: 20px; }
+
+.metric-table { width: 100%; border-collapse: collapse; }
+.metric-table caption {
+  caption-side: top;
+  text-align: left;
+  padding: 0 0 7px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+}
+.metric-table th,
+.metric-table td {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: baseline;
+}
+.metric-table tr:last-child th,
+.metric-table tr:last-child td { border-bottom: 0; }
+.metric-table th { text-align: left; font-weight: 500; }
+.m-id {
+  display: inline-block;
+  min-width: 30px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--muted);
+  opacity: 0.75;
+}
+.m-label { font-size: 13px; color: var(--fg); }
+.m-value {
+  text-align: right;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  padding-left: 16px;
+}
+.m-value.tone-ok { color: var(--ok); }
+.m-value.tone-warn { color: var(--warn); }
+.m-value.tone-bad { color: var(--bad); }
+.m-value.tone-muted { color: var(--muted); font-weight: 500; }
+.m-scope {
+  width: 1%;
+  padding-left: 20px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.metric-table tr.quiet .m-value { color: var(--muted); font-weight: 500; }
+.mt-reason td {
+  padding: 0 0 8px;
+  font-size: 11.8px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+@media (max-width: 760px) {
+  .aggregate { grid-template-columns: 1fr; }
+  .m-scope { display: none; }
+  .metric-table th { width: 60%; }
+}

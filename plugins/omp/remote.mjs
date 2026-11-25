@@ -20,6 +20,7 @@ import { createAgWorker } from "./ag-worker.mjs";
 import { acquireProviderOptIn } from "./remote-opt-in.mjs";
 import { ipcResponse } from "./ipc-response.mjs";
 import { sanitizeDirectResponse } from "./router/direct-guard.mjs";
+import { buildPublicSummary, encodePublicSummary } from "./router/status-page/public-summary.mjs";
 
 const PATHS = new Set(["/v1/chat/completions", "/v1/completions"]);
 const HEADER_NAMES = ["content-type", "cache-control", "retry-after", "x-zproxy-decode"];
@@ -228,6 +229,17 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
     timer.unref();
     return {
       registry, storage,
+      /// The public routing summary: one bounded, whitelisted document. It
+      /// never contains an account id, unitRef, provider, model name, or the
+      /// worker host. A disabled router or a read failure is reported as such,
+      /// never as zeros.
+      statusSummary(limit = 65536) {
+        try {
+          return encodePublicSummary(buildPublicSummary(routing?.router?.statusView?.() ?? null), limit)
+        } catch {
+          return encodePublicSummary(buildPublicSummary(null, { reason: "路由统计读取失败" }), limit)
+        }
+      },
       async handle(request) {
         const url = new URL(request.url);
         if (request.method !== "POST" || url.search || !PATHS.has(url.pathname)) return Response.json({ error: "Unknown completion route." }, { status: 404 });
@@ -342,6 +354,21 @@ async function main() {
       async fetch(request) {
         const url = new URL(request.url);
         if (url.pathname === "/health" && request.method === "GET") return chunkedResponse(Response.json({ ready: !stopping }));
+        // Read-only aggregate routing statistics for the private F# bridge.
+        // A completion caller cannot reach it: the head method must be a
+        // bodyless read, the exact path is required, and any query is refused.
+        // Both GET and POST are accepted because the bridge owns the framing
+        // and the reply is identical: a bodyless read has no method-dependent
+        // behaviour, so a method change on either side cannot strand the panel.
+        if (url.pathname === "/status" && (request.method === "GET" || request.method === "POST")) {
+          if (url.search) return chunkedResponse(Response.json({ error: "Unknown status route." }, { status: 404 }));
+          if (Number(request.headers.get("content-length") ?? "0") > 0) {
+            return chunkedResponse(Response.json({ error: "Unknown status route." }, { status: 404 }));
+          }
+          return chunkedResponse(new Response(app.statusSummary(), {
+            status: 200, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+          }));
+        }
         if (url.pathname === "/shutdown" && request.method === "POST") {
           setTimeout(() => { void stop(); }, 25);
           return chunkedResponse(Response.json({ stopping: true }));

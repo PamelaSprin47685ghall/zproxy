@@ -599,7 +599,39 @@ def run(binary, omp_dir, timeout, antigravity=False, tls=None):
             cookies = http.cookies.SimpleCookie()
             cookies.load(headers.get("Set-Cookie", ""))
             require("zproxy-admin" in cookies, "The administrator cookie is missing.")
-            status, _, data = web("POST", "/admin/api/users", {"nickname": nickname}, "zproxy-admin=" + cookies["zproxy-admin"].value)
+            # The routing summary crosses the private socket with a bodyless read.
+            # This is the only place that proves the F# head framing and the Bun
+            # route agree; without the shims configuration the endpoint must say
+            # so instead of answering a zero-filled snapshot.
+            admin_cookie = "zproxy-admin=" + cookies["zproxy-admin"].value
+            phase = "reading the routing summary over the private socket"
+            status, routing_headers, routing_body = web("GET", "/admin/api/routing", None, admin_cookie)
+            require(status == 200, f"The routing summary returned {status}.")
+            require(routing_headers.get("Content-Type", "").startswith("application/json"),
+                    "The routing summary is not JSON.")
+            routing = json.loads(routing_body)
+            require(isinstance(routing.get("available"), bool),
+                    "The routing summary does not state its availability.")
+            require(set(routing) <= {"schemaVersion", "available", "reason", "detail", "generatedAt",
+                                     "buildVersion", "snapshotId", "epochSince", "store", "period",
+                                     "catalog", "metrics", "aggregate"},
+                    f"The routing summary grew a key outside the documented shape: {sorted(routing)}")
+            # The projection must never carry an account identity, a model name,
+            # or a host. Assert on the raw text, not on a selected field.
+            for forbidden in ("unitRef", "u_", "accountId", "@", "host", "pid"):
+                require(forbidden not in routing_body.decode(),
+                        f"The routing summary exposed {forbidden!r}.")
+            phase = "serving the authenticated routing page"
+            status, page_headers, page_body = web("GET", "/admin/reports", None, admin_cookie)
+            require(status == 200 and b'data-page="routing"' in page_body,
+                    "The routing page did not load its own shell.")
+            require("script-src 'self'" in page_headers.get("Content-Security-Policy", ""),
+                    "The routing page lost its content security policy.")
+            status, _, anonymous_body = web("GET", "/admin/api/routing")
+            require(status == 401, "The routing summary answered without a session.")
+            require(b"routing" not in anonymous_body, "The routing summary leaked to an unauthenticated caller.")
+
+            status, _, data = web("POST", "/admin/api/users", {"nickname": nickname}, admin_cookie)
             require(status == 201, "The administrator could not create a user.")
             issued = json.loads(data)
             user_uuid, user_id = issued["uuid"], issued["user"]["id"]

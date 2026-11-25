@@ -119,7 +119,8 @@ module StatisticsTests =
         let names = typeof<Statistics.ReportRow>.GetProperties() |> Array.map (fun property -> property.Name) |> Array.sort
         let expected =
             [| "Nickname"; "Requests"; "Succeeded"; "Failed"; "Canceled"; "Active"
-               "RequestBytes"; "ResponseBytes"; "DurationMs" |] |> Array.sort
+               "RequestBytes"; "ResponseBytes"; "DurationMs"; "Series"; "Latency"; "HeadersLatency"
+               "Statuses"; "Kinds"; "Streamed"; "Buffered"; "PeakActive"; "LastSeen" |] |> Array.sort
         Assert.Equal<string>(expected, names)
 
     [<Fact>]
@@ -161,7 +162,7 @@ module StatisticsTests =
     }
 
     [<Theory>]
-    [<InlineData("{\"version\":2,\"users\":[]}")>]
+    [<InlineData("{\"version\":4,\"users\":[]}")>]
     [<InlineData("{\"version\":1,\"version\":1,\"users\":[]}")>]
     [<InlineData("{\"version\":1,\"users\":[{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"requests\":1,\"succeeded\":1,\"failed\":0,\"canceled\":0,\"requestBytes\":1,\"responseBytes\":1,\"durationMs\":1}]}")>]
     let ``Invalid or mismatched statistics are not silently accepted`` (text: string) =
@@ -185,3 +186,80 @@ module StatisticsTests =
         (stats :> IDisposable).Dispose()
         use reopened = new Statistics.Store(folder.Path, users.List)
         Assert.Equal(6L, Assert.Single(reopened.Snapshot()).ResponseBytes)
+
+    [<Fact>]
+    let ``Version one stores load with empty history`` () =
+        use folder = new Folder()
+        let users = new Users.Store(folder.Path)
+        let issued = users.Create("legacy")
+        let id = issued.User.Id
+        (users :> IDisposable).Dispose()
+        let text =
+            sprintf "{\"version\":1,\"users\":[{\"id\":\"%s\",\"requests\":2,\"succeeded\":2,\"failed\":0,\"canceled\":0,\"requestBytes\":8,\"responseBytes\":16,\"durationMs\":30}]}" id
+        File.WriteAllText(folder.File, text)
+        use reopened = new Users.Store(folder.Path)
+        use stats = new Statistics.Store(folder.Path, reopened.List)
+        let row = Assert.Single(stats.Snapshot())
+        Assert.Equal(2L, row.Requests)
+        Assert.Equal(16L, row.ResponseBytes)
+        Assert.Empty(row.Series)
+        Assert.Equal("0,0,0,0,0,0", String.Join(",", row.Latency))
+
+    [<Fact>]
+    let ``Hourly series and latency histogram survive a restart`` () =
+        use folder = new Folder()
+        use users = new Users.Store(folder.Path)
+        let user = users.Create("history")
+        use stats = new Statistics.Store(folder.Path, users.List)
+        for duration in [ 50L; 200L; 700L; 2000L; 10000L; 40000L ] do
+            (stats.Begin(identity user.User)).Finish(Statistics.Succeeded, 1L, 2L, duration)
+        let row = Assert.Single(stats.Snapshot())
+        Assert.Equal("1,1,1,1,1,1", String.Join(",", row.Latency))
+        let hour = Assert.Single(row.Series)
+        Assert.Equal(6L, hour.Requests)
+        Assert.Equal(6L, hour.Succeeded)
+        Assert.Equal(6L, hour.RequestBytes)
+        Assert.Equal(12L, hour.ResponseBytes)
+        Assert.Equal(52950L, hour.DurationMs)
+        (stats :> IDisposable).Dispose()
+        use reopened = new Statistics.Store(folder.Path, users.List)
+        let restored = Assert.Single(reopened.Snapshot())
+        Assert.Equal("1,1,1,1,1,1", String.Join(",", restored.Latency))
+        Assert.Equal(6L, (Assert.Single(restored.Series)).Requests)
+
+    [<Fact>]
+    let ``Snapshots use one instant and trim hours outside its window`` () =
+        use folder = new Folder()
+        use users = new Users.Store(folder.Path)
+        let user = users.Create("bounded")
+        let start = DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero)
+        let mutable at = start
+        use stats = new Statistics.Store(folder.Path, users.List, (fun () -> at))
+        (stats.Begin(identity user.User)).Finish(Statistics.Succeeded, 1L, 1L, 1L)
+        at <- start.AddHours(30.0)
+        (stats.Begin(identity user.User)).Finish(Statistics.Succeeded, 2L, 2L, 2L)
+        let struct (rows, stamp) = stats.SnapshotWithTime()
+        let row = Assert.Single(rows)
+        Assert.Equal(at, stamp)
+        let hourKey (time: DateTimeOffset) = time.ToUnixTimeSeconds() / 3600L
+        Assert.Equal(hourKey at, (Assert.Single(row.Series)).Hour)
+        Assert.Equal(2L, row.Requests)
+        Assert.Equal(1, (Assert.Single(stats.Snapshot())).Series.Length)
+
+    [<Fact>]
+    let ``Version one history is reported as latency without coverage`` () =
+        use folder = new Folder()
+        let users = new Users.Store(folder.Path)
+        let issued = users.Create("legacy")
+        let id = issued.User.Id
+        (users :> IDisposable).Dispose()
+        let text =
+            sprintf "{\"version\":1,\"users\":[{\"id\":\"%s\",\"requests\":3,\"succeeded\":2,\"failed\":1,\"canceled\":0,\"requestBytes\":8,\"responseBytes\":16,\"durationMs\":30}]}" id
+        File.WriteAllText(folder.File, text)
+        use reopened = new Users.Store(folder.Path)
+        use stats = new Statistics.Store(folder.Path, reopened.List)
+        let row = Assert.Single(stats.Snapshot())
+        let completed = row.Succeeded + row.Failed + row.Canceled
+        Assert.Equal(3L, completed)
+        Assert.Equal(0L, Array.sum row.Latency)
+        Assert.Equal(3L, completed - Array.sum row.Latency)

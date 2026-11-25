@@ -5,6 +5,7 @@ open System.Buffers.Binary
 open System.IO
 open System.Net.Http
 open System.Text
+open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 
@@ -223,8 +224,55 @@ module Omp =
         | Some plugin -> runWorker plugin "local" (fun worker token ->
             Client.runWithDecoders options [ requestPlugin worker ] [ decoder worker ] token :> Task) ct
 
+    /// One bounded read of the remote routing summary over the same private
+    /// socket as completions. Every failure mode yields `None`, so a disabled
+    /// or broken plugin never turns into a wrong number on the admin page.
+    let private routingSource (worker: OmpWorker.Worker) (ct: CancellationToken) = task {
+        try
+            // The endpoint is read-only and answers GET only; any other method is
+            // a 404. The body is read through a bounded buffer: a wrong or hostile
+            // reply cannot make this process hold an unbounded string.
+            let! reply, _ = worker.SendAsync("GET", "/status", [], (fun _ _ -> Task.CompletedTask), ct)
+            use reply = reply
+            if not reply.IsSuccessStatusCode then return None
+            else
+                use! stream = reply.Content.ReadAsStreamAsync(ct)
+                use body = new System.IO.MemoryStream(4096)
+                let chunk = Array.zeroCreate<byte> 8192
+                let mutable total = 0
+                let mutable overflow = false
+                let mutable reading = true
+                while reading do
+                    let! read = stream.ReadAsync(Memory<byte>(chunk, 0, chunk.Length), ct)
+                    if read = 0 then reading <- false
+                    else
+                        total <- total + read
+                        if total > 65536 then
+                            // Stop at the first byte past the limit. The rest of the
+                            // reply is discarded with the response, never buffered.
+                            overflow <- true
+                            reading <- false
+                        else body.Write(chunk, 0, read)
+                let text = if overflow then "" else System.Text.Encoding.UTF8.GetString(body.GetBuffer(), 0, int body.Length).Trim()
+                if text.Length = 0 || not (text.StartsWith("{", StringComparison.Ordinal)) then
+                    return None
+                else
+                    // Only a JSON object that states its own availability is data.
+                    // An HTML error page or a truncated body is a failed read.
+                    use document = JsonDocument.Parse(text, JsonDocumentOptions(MaxDepth = 32))
+                    if document.RootElement.ValueKind <> JsonValueKind.Object then return None
+                    else
+                        match document.RootElement.TryGetProperty("available") with
+                        | true, value when value.ValueKind = JsonValueKind.True
+                                           || value.ValueKind = JsonValueKind.False -> return Some text
+                        | _ -> return None
+        with
+        | :? OperationCanceledException when ct.IsCancellationRequested -> return raise (OperationCanceledException ct)
+        | _ -> return None
+    }
+
     let runServer (options: Options.ServerOptions) ct =
         match options.Omp with
         | None -> Server.run options ct :> Task
         | Some plugin -> runWorker plugin "remote" (fun worker token ->
-            Server.runWithHandler options (remoteHandler worker) token :> Task) ct
+            Server.runWithRouting options (remoteHandler worker) (Some(routingSource worker)) token :> Task) ct

@@ -182,10 +182,27 @@ module Management =
             writer.WriteString("uuid", issued.Uuid)
             writer.WriteEndObject())
 
+    /// Latency histogram bounds in milliseconds; the last bucket has no upper bound.
+    let private latencyBounds = [| 100; 500; 1000; 5000; 30000 |]
+
+    /// Public names for the response status classes, in counter order.
+    let private statusClasses = [| "2xx"; "3xx"; "4xx"; "5xx"; "noResponse" |]
+
     /// This public projection never receives a user record or credential.
-    let private writeReport context (rows: Statistics.ReportRow[]) =
+    let private writeReport context (generatedAt: DateTimeOffset) (rows: Statistics.ReportRow[]) =
         writeJson context 200 (fun writer ->
             writer.WriteStartObject()
+            writer.WriteString("generatedAt", generatedAt.ToString("O"))
+            writer.WriteStartArray("latencyBoundsMs")
+            for bound in latencyBounds do writer.WriteNumberValue bound
+            writer.WriteEndArray()
+            writer.WriteStartArray("statusClasses")
+            for name in statusClasses do writer.WriteStringValue name
+            writer.WriteEndArray()
+            writer.WriteStartArray("requestKinds")
+            writer.WriteStringValue("chat")
+            writer.WriteStringValue("completions")
+            writer.WriteEndArray()
             writer.WriteStartArray("users")
             for row in rows do
                 writer.WriteStartObject()
@@ -198,6 +215,50 @@ module Management =
                 writer.WriteNumber("requestBytes", row.RequestBytes)
                 writer.WriteNumber("responseBytes", row.ResponseBytes)
                 writer.WriteNumber("durationMs", row.DurationMs)
+                writer.WriteStartArray("latency")
+                for count in row.Latency do writer.WriteNumberValue count
+                writer.WriteEndArray()
+                // A migrated row (v1/v2 history) has completed requests but no status,
+                // route, or body-type counters. Emitting zeros there would be a fake
+                // measurement, so those blocks are absent as `null` instead.
+                let measured = row.Succeeded + row.Failed + row.Canceled = 0L
+                              || Array.sum row.Statuses > 0L
+                if measured then
+                    writer.WriteStartArray("headersLatency")
+                    for count in row.HeadersLatency do writer.WriteNumberValue count
+                    writer.WriteEndArray()
+                    writer.WriteStartObject("statusBuckets")
+                    for index in 0 .. statusClasses.Length - 1 do
+                        writer.WriteNumber(statusClasses[index], row.Statuses[index])
+                    writer.WriteEndObject()
+                    writer.WriteStartObject("kinds")
+                    writer.WriteNumber("chat", row.Kinds[0])
+                    writer.WriteNumber("completions", row.Kinds[1])
+                    writer.WriteEndObject()
+                    writer.WriteNumber("streamed", row.Streamed)
+                    writer.WriteNumber("buffered", row.Buffered)
+                else
+                    writer.WriteNull("headersLatency")
+                    writer.WriteNull("statusBuckets")
+                    writer.WriteNull("kinds")
+                    writer.WriteNull("streamed")
+                    writer.WriteNull("buffered")
+                writer.WriteNumber("peakActive", row.PeakActive)
+                if row.LastSeen = 0L then writer.WriteNull("lastSeen")
+                else writer.WriteString("lastSeen", DateTimeOffset.FromUnixTimeSeconds(row.LastSeen).ToString("O"))
+                writer.WriteStartArray("series")
+                for hour in row.Series do
+                    writer.WriteStartObject()
+                    writer.WriteNumber("hour", hour.Hour)
+                    writer.WriteNumber("requests", hour.Requests)
+                    writer.WriteNumber("succeeded", hour.Succeeded)
+                    writer.WriteNumber("failed", hour.Failed)
+                    writer.WriteNumber("canceled", hour.Canceled)
+                    writer.WriteNumber("requestBytes", hour.RequestBytes)
+                    writer.WriteNumber("responseBytes", hour.ResponseBytes)
+                    writer.WriteNumber("durationMs", hour.DurationMs)
+                    writer.WriteEndObject()
+                writer.WriteEndArray()
                 writer.WriteEndObject()
             writer.WriteEndArray()
             writer.WriteEndObject())
@@ -219,30 +280,6 @@ td:first-child{font-weight:600;color:#263c59}tr:last-child td{border-bottom:0}.m
 .muted{font-size:14px;color:#66768b}.empty{padding:30px;text-align:center;color:#66768b}.secret{border-color:#f0cf85;background:#fffaf0}
 [hidden]{display:none!important}@media(max-width:680px){main{margin:24px auto;padding:0 14px}header{align-items:start}h1{font-size:24px}.card{padding:18px}input{min-width:0;width:100%}.row>div{flex:1}}
 """
-
-    let private reportPage = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>zproxy · 使用统计</title><style nonce="%NONCE%">%STYLE%</style></head><body><main>
-<header><div><h1>使用统计</h1><p>按昵称汇总的服务器统计，无需登录。</p></div><a href="/admin">用户管理</a></header>
-<section class="card"><div class="row"><div><h2>累计用量</h2><p class="muted">请求结果、原始正文流量与耗时由服务器记录。此页不显示账户凭据。</p></div><button id="refresh" class="secondary" type="button">刷新</button></div>
-<p id="message" class="message" role="status"></p><div class="table-wrap"><table><thead><tr><th>昵称</th><th>请求</th><th>成功</th><th>失败</th><th>取消</th><th>进行中</th><th>上传</th><th>下行</th><th>平均耗时</th></tr></thead><tbody id="rows"></tbody></table></div><p id="empty" class="empty" hidden>暂无用户统计。</p><p id="updated" class="muted"></p></section>
-</main><script nonce="%NONCE%">
-const rows=document.querySelector('#rows'), message=document.querySelector('#message'), refreshButton=document.querySelector('#refresh');
-const bytes=value=>value<1024?value+' B':value<1048576?(value/1024).toFixed(1)+' KiB':(value/1048576).toFixed(1)+' MiB';
-async function refresh(){
-  refreshButton.disabled=true;
-  try{
-    const response=await fetch('/api/reports',{credentials:'omit',cache:'no-store'});
-    if(!response.ok)throw new Error('暂时无法读取统计。');
-    const data=await response.json();rows.replaceChildren();
-    for(const user of data.users){
-      const row=document.createElement('tr'), completed=user.succeeded+user.failed+user.canceled;
-      const values=[user.nickname,user.requests,user.succeeded,user.failed,user.canceled,user.active,bytes(user.requestBytes),bytes(user.responseBytes),completed?Math.round(user.durationMs/completed)+' ms':'—'];
-      for(const value of values){const cell=document.createElement('td');cell.textContent=String(value);row.append(cell);}rows.append(row);
-    }
-    document.querySelector('#empty').hidden=data.users.length!==0;message.textContent='';document.querySelector('#updated').textContent='更新于 '+new Date().toLocaleTimeString();
-  }catch(error){message.textContent=error.message;}finally{refreshButton.disabled=false;}
-}
-refreshButton.addEventListener('click',refresh);refresh();setInterval(refresh,15000);
-</script></body></html>"""
 
     let private adminPage = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>zproxy · 用户管理</title><style nonce="%NONCE%">%STYLE%</style></head><body><main>
 <header><div><h1>用户管理</h1><p>主密码解锁管理；每位用户使用独立 UUID。</p></div><a href="/reports">公开统计</a></header>
@@ -291,7 +328,11 @@ window.addEventListener('pagehide',clearSecret);act(loadUsers);
         do! context.Response.WriteAsync((page: string).Replace("%STYLE%", style).Replace("%NONCE%", nonce), context.RequestAborted)
     }
 
-    let private handle (sessions: Sessions) (users: Users.Store) (statistics: Statistics.Store) (context: HttpContext) = task {
+    /// Reads the optional routing summary from the OMP worker. `None` means the
+    /// plugin is disabled or the remote refused; the caller reports that state
+    /// instead of an empty object.
+    let private handle (sessions: Sessions) (users: Users.Store) (statistics: Statistics.Store)
+                       (routing: (CancellationToken -> Task<string option>) option) (context: HttpContext) = task {
         context.Response.Headers.CacheControl <- "no-store"
         context.Response.Headers.XContentTypeOptions <- "nosniff"
         context.Response.Headers["Referrer-Policy"] <- "no-referrer"
@@ -299,8 +340,15 @@ window.addEventListener('pagehide',clearSecret);act(loadUsers);
             let path = context.Request.Path.Value
             let method = context.Request.Method
             match method, path with
-            | "GET", "/" | "GET", "/reports" -> do! writePage context reportPage
-            | "GET", "/api/reports" -> do! writeReport context (statistics.Snapshot())
+            | "GET", "/" | "GET", "/reports" -> do! StatusPage.write context
+            | "GET", "/api/reports" ->
+                let struct (rows, generatedAt) = statistics.SnapshotWithTime()
+                do! writeReport context generatedAt rows
+            | "GET", "/admin/reports" ->
+                requirePrivateTransport context
+                do! StatusPage.writeRouting context
+            | "GET", path when path.StartsWith("/assets/", StringComparison.Ordinal) ->
+                do! StatusPage.serve context path
             | "GET", "/admin" | "GET", "/admin/" ->
                 requirePrivateTransport context
                 do! writePage context adminPage
@@ -333,6 +381,26 @@ window.addEventListener('pagehide',clearSecret);act(loadUsers);
                         for user in users.List() do writeUser writer user
                         writer.WriteEndArray()
                         writer.WriteEndObject())
+                // Aggregate upstream routing statistics. Authenticated only: the
+                // public report stays limited to nicknames and counters, because
+                // capacity and health counts are account state.
+                | "GET", "/admin/api/routing" ->
+                    let unavailable (reason: string) (reasonText: string) =
+                        writeJson context 200 (fun writer ->
+                            writer.WriteStartObject()
+                            writer.WriteBoolean("available", false)
+                            writer.WriteString("reason", reason)
+                            writer.WriteString("detail", reasonText)
+                            writer.WriteEndObject())
+                    match routing with
+                    | None -> do! unavailable "路由统计未启用" "OMP 插件未在此进程启用。"
+                    | Some read ->
+                        match! read context.RequestAborted with
+                        | Some body ->
+                            context.Response.StatusCode <- 200
+                            context.Response.ContentType <- "application/json; charset=utf-8"
+                            do! context.Response.WriteAsync(body, context.RequestAborted)
+                        | None -> do! unavailable "路由统计暂不可用" "远端未返回可用的统计快照。"
                 | "POST", "/admin/api/users" ->
                     let! nickname = readString context "nickname"
                     do! writeIssued context 201 (users.Create(nickname))
@@ -358,7 +426,8 @@ window.addEventListener('pagehide',clearSecret);act(loadUsers);
     }
 
     let run (listen: IPEndPoint, masterPassword: string, users: Users.Store,
-             statistics: Statistics.Store, ct: CancellationToken) : Task = task {
+             statistics: Statistics.Store, routing: (CancellationToken -> Task<string option>) option,
+             ct: CancellationToken) : Task = task {
         if String.IsNullOrWhiteSpace(masterPassword) || Encoding.UTF8.GetByteCount(masterPassword) > 1024 then
             invalidArg "masterPassword" "The master password must contain 1 to 1024 UTF-8 bytes."
         use sessions = new Sessions(masterPassword)
@@ -381,7 +450,7 @@ window.addEventListener('pagehide',clearSecret);act(loadUsers);
         let request (context: HttpContext) = task {
             use request = CancellationTokenSource.CreateLinkedTokenSource(ct, context.RequestAborted)
             context.RequestAborted <- request.Token
-            do! handle sessions users statistics context
+            do! handle sessions users statistics routing context
         }
         app.Run(RequestDelegate(fun context -> request context :> Task))
         do! (app :> IHost).RunAsync(ct)

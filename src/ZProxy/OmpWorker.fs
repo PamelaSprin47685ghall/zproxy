@@ -135,7 +135,14 @@ module OmpWorker =
             output <- drain child.StandardOutput "stdout"
         }
 
-        member _.SendAsync(path: string, headers: (string * string) list,
+        member this.SendAsync(path: string, headers: (string * string) list,
+                              writeBody: Stream -> CancellationToken -> Task, ct: CancellationToken) =
+            this.SendAsync("POST", path, headers, writeBody, ct)
+
+        /// One request over the private socket. A bodyless method sends an explicit
+        /// zero length instead of a chunked body, so a read-only endpoint sees a
+        /// plain GET.
+        member _.SendAsync(method: string, path: string, headers: (string * string) list,
                            writeBody: Stream -> CancellationToken -> Task, ct: CancellationToken) = task {
             let lifetime = CancellationTokenSource.CreateLinkedTokenSource(stop.Token, ct)
             let token = lifetime.Token
@@ -159,13 +166,17 @@ module OmpWorker =
                     headers |> List.filter (fun (name, _) ->
                         not (List.exists (fun key -> name.Equals(key, StringComparison.OrdinalIgnoreCase))
                             [ "Content-Length"; "Transfer-Encoding"; "Host"; "Connection" ]))
+                let bodyless = method = "GET" || method = "HEAD"
                 do! connection.WriteHeadAsync(
-                    { StartLine = "POST " + path + " HTTP/1.1"
-                      Headers = [ "Host", "localhost"; "Transfer-Encoding", "chunked"; "Connection", "close" ] @ fields }, token)
+                    { StartLine = method + " " + path + " HTTP/1.1"
+                      Headers = [ "Host", "localhost" ]
+                                @ (if bodyless then [ "Content-Length", "0" ]
+                                   else [ "Transfer-Encoding", "chunked" ])
+                                @ [ "Connection", "close" ] @ fields }, token)
                 let id = Interlocked.Increment(&nextCall)
                 let writing = task {
                     try
-                        do! writeBody connection.Body token
+                        if not bodyless then do! writeBody connection.Body token
                         do! connection.CompleteWritesAsync(token)
                     with _ -> (connection :> IDisposable).Dispose()
                 }

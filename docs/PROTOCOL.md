@@ -247,7 +247,7 @@ handler 的调用者持有输入请求，并负责在最终响应使用完后释
 | 路径 | 方法 | 访问条件与结果 |
 | --- | --- | --- |
 | `/`、`/reports` | GET | 公开报告页面 |
-| `/api/reports` | GET | 公开 `{ "users": [...] }`，只含昵称和计数 |
+| `/api/reports` | GET | 公开 `{ "generatedAt", "latencyBoundsMs", "statusClasses", "requestKinds", "users": [...] }`，只含昵称和计数 |
 | `/admin`、`/admin/` | GET | 登录及用户管理页面；只允许私有传输条件 |
 | `/admin/login` | POST | JSON `{ "password": "..." }`，验证主密码后设置会话 Cookie |
 | `/admin/logout` | POST | 管理会话，删除会话和 Cookie |
@@ -260,7 +260,17 @@ handler 的调用者持有输入请求，并负责在最终响应使用完后释
 
 私有传输允许直接 loopback HTTP，或 HTTPS。部署通过 loopback 反向代理终止 HTTPS 时，代理须保留外部 Host 并设置单值 `X-Forwarded-Proto: https`；只有 loopback 来源才信任该声明。带转发标记的明文代理请求不视为直接本机请求，任意远端来源不能靠伪造转发头取得信任。远端明文 HTTP 下连管理密码表单也不会输出，公开报告仍可读取。
 
-服务端身份绑定统计，公开行只包含 nickname、requests、succeeded、failed、canceled、active、requestBytes、responseBytes、durationMs。内部 ID、selector 和认证材料不进入公共 JSON、HTML 或 DOM。统计只保存汇总，不解析模型 token。
+服务端身份绑定统计，公开行只包含 nickname、requests、succeeded、failed、canceled、active、requestBytes、responseBytes、durationMs、latency、headersLatency、statusBuckets、kinds、streamed、buffered、peakActive、lastSeen、series。内部 ID、selector 和认证材料不进入公共 JSON、HTML 或 DOM。统计只保存汇总，不解析模型 token，也不记录模型名、上游账号或路由决策。
+
+`headersLatency` 与 `latency` 同形，是 **响应头等待** 的 6 档计数：从请求开始到收到响应头的时间，也就是调用方在收到任何正文之前的等待。正文随后流式返回时该值仍然有效。只有确实收到响应头的请求才计入，传输层失败不计入，因此 `sum(headersLatency) <= succeeded + failed + canceled` 是结构性不变量，而不是等式。
+
+`statusBuckets` 是对象，键固定为 `2xx`、`3xx`、`4xx`、`5xx`、`noResponse`，与顶层 `statusClasses` 顺序一致。`noResponse` 表示请求在收到响应头之前结束（连接失败、超时、隧道关闭或调用方中断）。对**本版本记录的请求**，`sum(statusBuckets) = succeeded + failed + canceled` 且 `sum(kinds) = requests - active` 恒成立。迁移进来的 v1/v2 历史行没有这些计数：此时 `headersLatency`、`statusBuckets`、`kinds`、`streamed`、`buffered` 一律输出 `null`（不是零对象），客户端必须显示为未知；只有该行在本版本记录过请求后，这些字段才变成实际计数。`kinds` 是对象，键固定为 `chat` 与 `completions`，对应 `/v1/chat/completions` 与 `/v1/completions` 两条路径，是路由而不是模型。`streamed` 与 `buffered` 按响应的 `IsStreaming` 元数据分组，不解析正文；只有确实收到响应头的请求才计入，`noResponse` 的请求既不算流式也不算缓冲，因此 `streamed + buffered = succeeded + failed + canceled - statusBuckets.noResponse`，而不是等于完成数。
+
+管理端的 `GET /status`（OMP 私有 Unix socket）只接受 `GET` 且不接受查询串，`POST` 与其他路径一律 404；应答上限 64 KiB，读取方按字节流限长，超出即整体丢弃并按“不可用”处理，绝不先整段读入内存。
+
+`peakActive` 是该用户历史上同时进行中的请求数的最高值，只升不降。`lastSeen` 是最近一次完成请求的 ISO 8601 时间，从未完成过请求时为 `null`。这些字段都以昵称行为单位公开，和累计计数一样不含任何标识信息。
+
+`latency` 是 6 个计数，对应顶层 `latencyBoundsMs`（100、500、1000、5000、30000）的 5 个上界和 `>=30000` 的末档：`<100`、`<500`、`<1000`、`<5000`、`<30000`、`>=30000` 毫秒。`series` 是最近 24 个 UTC 小时内有过请求的小时桶，按 `hour`（Unix 秒整除 3600）升序，每桶含 requests、succeeded、failed、canceled、requestBytes、responseBytes、durationMs；无请求的小时省略，由客户端按 `generatedAt` 推算补零。两种结构都持久化，重启后保留；内存上限为每用户 24 个桶、各 6 档延迟与响应头计数、5 个状态类计数和 2 个路径计数，超出窗口时丢弃最旧的小时。`stats.json` 版本为 3；版本 1 与 2 的文件仍可读取，读入后小时序列为空、延迟直方图为零，新增的响应头、状态类、路径和并发字段也全为零。因此 `sum(latency)` 是**有耗时样本的完成请求数**，`succeeded + failed + canceled - sum(latency)` 是升级前没有样本的历史请求数；`sum(statusBuckets)` 与 `sum(kinds)` 同样只覆盖本版本上线后的请求。两者不得混同，页面必须显示样本覆盖率而不是把缺失样本当作 0 毫秒。小时序列同理，只覆盖本版本上线后的时段。
 
 requestBytes 统计远端实际读取的请求正文，responseBytes 统计远端实际读取的网关响应正文；按请求结束时汇总，包含失败或取消前已读的部分。二者都是隧道压缩前的正文计数，不是线上的总字节。成功表示远端读到完整 2xx 响应 EOF，不能证明客户端已消费、解码或展示；durationMs 也不是客户端端到端耗时。本地短路请求没有远端记录。
 

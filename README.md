@@ -34,6 +34,8 @@ client 与 server 之间是一个 `POST /tunnel` 和一个长时间保持的 `20
 ```sh
 sudo apt-get update
 sudo apt-get install --no-install-recommends -y clang libzstd-dev zlib1g-dev libssl-dev
+# 状态页产物已入库；改过 frontend/ 后先重建，用 --check 在 CI 校验是否过期。
+python3 scripts/build-status-page.py
 dotnet restore zproxy.slnx
 dotnet test zproxy.slnx --configuration Release --no-restore
 dotnet publish src/ZProxy/ZProxy.fsproj --configuration Release \
@@ -238,7 +240,7 @@ OMP 的 `/v1/completions` 是 text prompt 到 chat 的兼容入口：只接受�
 
 ## 管理、公开报告与数据文件
 
-`/` 和 `/reports` 是无需登录的统计页，`/api/reports` 是同样公开的 JSON API。它们只输出昵称与 `requests`、`succeeded`、`failed`、`canceled`、`active`、`requestBytes`、`responseBytes`、`durationMs`，不输出 UUID、内部用户 ID、selector 或派生密钥。新用户也有零计数行，停用用户的历史仍可查看。
+`/` 和 `/reports` 是无需登录的统计页，`/api/reports` 是同样公开的 JSON API。它们只输出昵称与 `requests`、`succeeded`、`failed`、`canceled`、`active`、`requestBytes`、`responseBytes`、`durationMs`，以及有界的 `latency` 与 `headersLatency` 直方图、`statusBuckets`（`2xx`、`3xx`、`4xx`、`5xx`、`noResponse`）、`kinds`（`chat`、`completions`）、`streamed`/`buffered` 响应形态计数、`peakActive` 并发峰值、`lastSeen` 最近活动时间，和最近 24 个 UTC 小时的 `series` 桶（顶层带 `generatedAt`、`latencyBoundsMs`、`statusClasses`、`requestKinds`），不输出 UUID、内部用户 ID、selector 或派生密钥。这些字段全部来自本地观测：响应状态、响应头到达时刻、请求路径和流式标记，不含模型名、上游账号或路由决策。新用户也有零计数行，停用用户的历史仍可查看。
 
 统计来自认证后的远端用户身份，应用头和正文不能指定记账用户。口径如下：
 

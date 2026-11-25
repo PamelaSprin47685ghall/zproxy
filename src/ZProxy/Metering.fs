@@ -47,39 +47,71 @@ module Metering =
         return content :> HttpContent
     }
 
+    /// Map a response status to its class. A code outside every range is reported
+    /// as `NoResponse` because it carries no usable class.
+    let private statusClass (code: int) =
+        if code >= 200 && code < 300 then Statistics.Success
+        elif code >= 300 && code < 400 then Statistics.Redirect
+        elif code >= 400 && code < 500 then Statistics.ClientError
+        elif code >= 500 && code < 600 then Statistics.ServerError
+        else Statistics.NoResponse
+
+    /// The route, never the model. These are the only two accepted paths.
+    let private kindOf (path: string) =
+        if path = "/v1/chat/completions" then Statistics.ChatCompletions
+        else Statistics.LegacyCompletions
+
     /// Statistics belong to the authenticated server identity, never a request field.
     let wrap (stats: Statistics.Store) (handler: RemoteHandler) : RemoteHandler =
         fun identity request ct -> task {
-            Contracts.requestPath request |> ignore
+            let path = Contracts.requestPath request
             let activity = stats.Begin(identity)
             let watch = Stopwatch.StartNew()
             let mutable uploaded = 0L
             let mutable downloaded = 0L
-            let finish outcome =
-                activity.Finish(outcome, Interlocked.Read(&uploaded), Interlocked.Read(&downloaded), watch.ElapsedMilliseconds)
+            let finish status headersMs streaming outcome =
+                activity.Finish
+                    { Outcome = outcome
+                      RequestBytes = Interlocked.Read(&uploaded)
+                      ResponseBytes = Interlocked.Read(&downloaded)
+                      DurationMs = watch.ElapsedMilliseconds
+                      HeadersMs = headersMs
+                      Status = status
+                      Kind = kindOf path
+                      Streaming = streaming }
+            /// The request ended before a response head: transport failure, timeout,
+            /// or a tunnel that closed. Nothing was observed about the response.
+            let failed outcome = finish Statistics.NoResponse 0L false outcome
             try
                 if request.Content <> null then
                     let! content = contentView request.Content
                                         (fun count -> Interlocked.Add(&uploaded, int64 count) |> ignore) ignore ct
                     request.Content <- content
                 let! reply = handler identity request ct
+                // Time from request start to the response head. This is the wait the
+                // caller pays before any body byte, so a slow origin shows here even
+                // when the body streams immediately afterwards.
+                let headersMs = watch.ElapsedMilliseconds
+                let status = statusClass (int reply.Response.StatusCode)
+                let streaming = reply.Metadata.IsStreaming
+                let doneReading complete =
+                    let outcome =
+                        if complete then
+                            if status = Statistics.Success then Statistics.Succeeded else Statistics.Failed
+                        elif ct.IsCancellationRequested then Statistics.Canceled
+                        else Statistics.Failed
+                    finish status headersMs streaming outcome
                 try
-                    let status = int reply.Response.StatusCode
-                    let doneReading complete =
-                        let outcome =
-                            if complete then
-                                if status >= 200 && status < 300 then Statistics.Succeeded else Statistics.Failed
-                            elif ct.IsCancellationRequested then Statistics.Canceled
-                            else Statistics.Failed
-                        finish outcome
                     let! content = contentView reply.Response.Content
                                         (fun count -> Interlocked.Add(&downloaded, int64 count) |> ignore) doneReading ct
                     reply.Response.Content <- content
                     return reply
                 with error ->
                     reply.Response.Dispose()
+                    finish status headersMs streaming
+                        (if ct.IsCancellationRequested then Statistics.Canceled else Statistics.Failed)
                     return raise error
             with error ->
-                finish (if ct.IsCancellationRequested then Statistics.Canceled else Statistics.Failed)
+                failed (if ct.IsCancellationRequested then Statistics.Canceled else Statistics.Failed)
                 return raise error
         }

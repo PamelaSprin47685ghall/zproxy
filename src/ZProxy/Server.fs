@@ -10,7 +10,8 @@ open System.Threading
 open System.Threading.Tasks
 
 module Server =
-    let runWithHandler (options: Options.ServerOptions) (handler: RemoteHandler) (ct: CancellationToken) = task {
+    let runWithRouting (options: Options.ServerOptions) (handler: RemoteHandler)
+                       (routing: (CancellationToken -> Task<string option>) option) (ct: CancellationToken) = task {
         Options.validate options.Limits |> ignore
         if String.IsNullOrWhiteSpace(options.AdminPassword) then invalidArg "options" "An admin password is required."
         if options.MaxTunnels < 1 || options.MaxTunnels > 1024
@@ -82,7 +83,7 @@ module Server =
                     else tcp.Dispose()
             with :? OperationCanceledException when token.IsCancellationRequested -> ()
         }
-        let web = Management.run(options.WebListen, options.AdminPassword, users, statistics, token)
+        let web = Management.run(options.WebListen, options.AdminPassword, users, statistics, routing, token)
         let save = task {
             use timer = new PeriodicTimer(TimeSpan.FromSeconds(5.0))
             try
@@ -111,9 +112,12 @@ module Server =
         match failure with Some error when not ct.IsCancellationRequested -> return raise error | _ -> return ()
     }
 
+    let runWithHandler (options: Options.ServerOptions) (handler: RemoteHandler) (ct: CancellationToken) =
+        runWithRouting options handler None ct
+
     let run (options: Options.ServerOptions) ct = task {
         let gateway = options.Gateway |> Option.defaultWith (fun () -> invalidArg "options" "A remote gateway is required.")
         use upstream = new Upstream.UpstreamClient(gateway, options.GatewayToken)
         let handler: RemoteHandler = fun _ request token -> upstream.SendAsync(request, token)
-        return! runWithHandler options handler ct
+        return! runWithRouting options handler None ct
     }
