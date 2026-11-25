@@ -79,6 +79,19 @@ def free_ports():
 
 def descendants(pid):
     result = set()
+    if not sys.platform.startswith("linux"):
+        rows = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
+        children_by_parent = {}
+        for line in rows.splitlines():
+            child, parent = (int(value) for value in line.split())
+            children_by_parent.setdefault(parent, set()).add(child)
+        pending = [pid]
+        while pending:
+            current = pending.pop()
+            children = children_by_parent.get(current, set()) - result
+            pending.extend(children)
+            result.update(children)
+        return result
     pending = [pid]
     while pending:
         current = pending.pop()
@@ -524,7 +537,21 @@ def run(binary, omp_dir, timeout, antigravity=False, tls=None):
             return
         if strict:
             require(code == 0, f"A native process exited with status {code}.")
-            require(all(not Path(f"/proc/{pid}").exists() for pid in children), "An OMP child process survived shutdown.")
+            if sys.platform.startswith("linux"):
+                stopped = lambda: all(not Path(f"/proc/{pid}").exists() for pid in children)
+            else:
+                def stopped():
+                    for pid in children:
+                        try:
+                            os.kill(pid, 0)
+                        except ProcessLookupError:
+                            continue
+                        return False
+                    return True
+            deadline = time.monotonic() + 5
+            while not stopped() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            require(stopped(), "An OMP child process survived shutdown.")
 
     def wait_listen(process, port):
         while True:

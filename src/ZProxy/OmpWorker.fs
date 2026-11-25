@@ -7,6 +7,7 @@ open System.IO
 open System.Net
 open System.Net.Http
 open System.Net.Sockets
+open System.Runtime.InteropServices
 open System.Threading
 open System.Threading.Tasks
 
@@ -94,7 +95,11 @@ module OmpWorker =
         member _.Completion: Task = child.WaitForExitAsync()
 
         member _.StartAsync(ct: CancellationToken) = task {
-            if not (OperatingSystem.IsLinux()) then invalidOp "The bundled OMP worker requires Linux."
+            let supportedPlatform =
+                OperatingSystem.IsLinux()
+                || (OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture = Architecture.Arm64)
+            if not supportedPlatform then
+                invalidOp "The OMP worker requires Linux or macOS arm64."
             if role <> "local" && role <> "remote" then invalidArg "role" "Unknown OMP worker role."
             let entry = Path.Combine(Path.GetFullPath(options.Directory), role + ".mjs")
             if not (File.Exists(entry)) || not (File.Exists(options.Bun)) then
