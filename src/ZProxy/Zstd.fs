@@ -19,7 +19,21 @@ module Zstd =
         val mutable Position: unativeint
         new(pointer, size) = { Pointer = pointer; Size = unativeint size; Position = 0un }
 
-    // The runtime package must supply this Linux library.
+    do
+        if OperatingSystem.IsMacOS() then
+            NativeLibrary.SetDllImportResolver(
+                typeof<Buffer>.Assembly,
+                DllImportResolver(fun name assembly searchPath ->
+                    if name = "libzstd.so.1" then
+                        let mutable handle = 0n
+                        if not (NativeLibrary.TryLoad("libzstd.1.dylib", assembly, searchPath, &handle))
+                           && not (NativeLibrary.TryLoad("libzstd.dylib", assembly, searchPath, &handle)) then
+                            raise (DllNotFoundException("libzstd.1.dylib was not found. Install zstd with Homebrew."))
+                        handle
+                    else
+                        0n))
+
+    // Linux uses its existing SONAME. The macOS resolver selects the dylib.
     module private Native =
         [<DllImport("libzstd.so.1", EntryPoint = "ZSTD_createCStream")>]
         extern nativeint createCompressor()

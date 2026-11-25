@@ -179,8 +179,10 @@ def source_snapshot(spec, cache, supplied, name, paths=()):
         if not (source / ".git").is_dir():
             source.mkdir(parents=True, exist_ok=True)
             run(["git", "init", "--quiet", source])
-        origin = subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=source, text=True).strip()
-        if origin != spec["repository"]:
+        remotes = subprocess.check_output(["git", "remote"], cwd=source, text=True).splitlines()
+        if "origin" not in remotes:
+            run(["git", "remote", "add", "origin", spec["repository"]], cwd=source)
+        else:
             run(["git", "remote", "set-url", "origin", spec["repository"]], cwd=source)
         run(["git", "fetch", "--depth", "1", "origin", "HEAD"], cwd=source)
         commit = subprocess.check_output(["git", "rev-parse", "FETCH_HEAD"], cwd=source, text=True).strip()

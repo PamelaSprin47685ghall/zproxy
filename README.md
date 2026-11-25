@@ -75,6 +75,26 @@ chmod +x zproxy-omp-linux-x64.AppImage
 
 使用较大的 AppImage 仍须显式加 `--omp` 才启动重插件。镜像不包含用户账户、上游凭据或服务器配置。完整构建布局、许可证和验证方式见 [packaging/README.md](packaging/README.md)。
 
+### macOS arm64 OMP 客户端
+
+在 Apple Silicon Mac 上安装 Python 3.12 或更新版本、.NET 10 SDK 和 Homebrew `zstd`。准备脚本会选择 Darwin Bun 与官方 `pi-natives-darwin-arm64` addon，也可用 `--bun` 指定已有的兼容版本。从仓库根目录构建：
+
+```sh
+python3 scripts/prepare-omp.py
+dotnet publish src/ZProxy/ZProxy.fsproj --configuration Release \
+  --runtime osx-arm64 --self-contained false --output artifacts/osx-arm64
+export DYLD_LIBRARY_PATH="$(brew --prefix zstd)/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+```
+
+按下文设置 `ZPROXY_USER_UUID`，然后启动客户端：
+
+```sh
+./artifacts/osx-arm64/ZProxy client --listen 127.0.0.1:18080 \
+  --server http://relay.example:8080 --omp --omp-dir ./plugins/omp
+```
+
+运行框架依赖产物的机器需要 .NET 10 ASP.NET Core Runtime。可以用 `python3 scripts/smoke-omp.py --binary artifacts/osx-arm64/ZProxy --omp-dir plugins/omp` 验证普通 OMP 解码链路。AppImage 和可选的 Antigravity2API Go codec 使用 Linux x64 构建流程。
+
 ## 启动与生成用户
 
 ### 1. 在远端设置管理主密码

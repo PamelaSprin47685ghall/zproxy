@@ -78,8 +78,11 @@
     }
   },
   "dependencies": {
-    "@oh-my-pi/pi-coding-agent": "workspace:*",
-    "@oh-my-pi/pi-natives-linux-x64": "*"
+    "@oh-my-pi/pi-coding-agent": "workspace:*"
+  },
+  "optionalDependencies": {
+    "@oh-my-pi/pi-natives-linux-x64": "*",
+    "@oh-my-pi/pi-natives-darwin-arm64": "*"
   },
   "files": [
     "ag-worker.mjs",

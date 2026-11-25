@@ -20,7 +20,10 @@
   },
   "bun": {
     "repository": "oven-sh/bun",
-    "asset": "bun-linux-x64-baseline.zip",
+    "assets": {
+      "linux-x64": "bun-linux-x64-baseline.zip",
+      "darwin-arm64": "bun-darwin-aarch64.zip"
+    },
     "minimumVersion": "1.4.4"
   },
   "ag2api": {
@@ -30,7 +33,10 @@
     "downloadIndex": "https://go.dev/dl/?mode=json"
   },
   "native": {
-    "package": "@oh-my-pi/pi-natives-linux-x64"
+    "packages": {
+      "linux-x64": "@oh-my-pi/pi-natives-linux-x64",
+      "darwin-arm64": "@oh-my-pi/pi-natives-darwin-arm64"
+    }
   },
   "appImageTool": {
     "repository": "AppImage/appimagetool",
