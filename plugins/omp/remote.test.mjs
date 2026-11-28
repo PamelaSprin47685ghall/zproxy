@@ -19,6 +19,8 @@ const text = 'data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","c
 let dir;
 let server;
 let gateway;
+let gatewayConfig;
+let gatewayInit;
 let seen;
 let mistralRequest;
 
@@ -51,8 +53,9 @@ beforeAll(async () => {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
   }, mistral: { api: "openai-completions", baseUrl: "https://api.mistral.ai/v1",
     apiKey: "fixture-mistral-key", models: [model] } } }));
-  gateway = await createRemoteGateway({ version: 1, authDatabase: join(dir, "auth.db"), modelsFile,
-    discovery: "offline", aliases: { friendly: "fixture/demo" } }, {
+  gatewayConfig = { version: 1, authDatabase: join(dir, "auth.db"), modelsFile,
+    discovery: "offline", aliases: { friendly: "fixture/demo" } };
+  gatewayInit = {
     async fetch(input, init) {
       if (String(input) !== "https://api.mistral.ai/v1/chat/completions") return fetch(input, init);
       const request = new Request(input, init);
@@ -68,8 +71,14 @@ beforeAll(async () => {
       return { async dispatch(request, peer, scope) {
         const body = await request.clone().json();
         return body.model === "fallback/native" ? fallback.route(request, peer, scope) : dispatch(request, peer, scope);
+      }, router: {
+        statusView: () => ({
+          routes: [{ id: "fixture-route", title: "Fixture route", strategy: "fixture-strategy" }],
+          metrics: { M01: { id: "M01", label: "Fixture metric" } },
+        }),
       }, close: () => fallback.close() };
-    } });
+    } };
+  gateway = await createRemoteGateway(gatewayConfig, gatewayInit);
 }, 30000);
 
 afterAll(async () => { await gateway?.close(); unregisterCustomApis("zproxy-remote-test"); server?.stop(true); if (dir) await rm(dir, { recursive: true, force: true }); });
@@ -150,6 +159,32 @@ describe("official remote OMP gateway", () => {
       expect(text).toContain('"text":"native fixture"');
       expect(text).not.toContain('"object":"chat.completion');
       if (streaming) expect(text).toContain("data: [DONE]");
+    }
+  });
+});
+
+describe("admin routing snapshot", () => {
+  test("reports the full router snapshot through statusSnapshot", () => {
+    const snapshot = JSON.parse(gateway.statusSnapshot());
+    expect(snapshot.available).toBe(true);
+    expect(snapshot.routes).toEqual([{
+      id: "fixture-route",
+      title: "Fixture route",
+      strategy: "fixture-strategy",
+    }]);
+    expect(snapshot.metrics.M01.id).toBe("M01");
+  });
+
+  test("fails closed when no router is configured", async () => {
+    const config = { ...gatewayConfig, authDatabase: join(dir, "auth-no-router.db") };
+    const init = { ...gatewayInit, routingFactory: ({ dispatch }) => ({ dispatch, close: () => {} }) };
+    const withoutRouter = await createRemoteGateway(config, init);
+    try {
+      const snapshot = JSON.parse(withoutRouter.statusSnapshot());
+      expect(snapshot.available).toBe(false);
+      expect(snapshot.reason).toBe("路由统计未启用");
+    } finally {
+      await withoutRouter.close();
     }
   });
 });

@@ -232,12 +232,15 @@ module Omp =
             // The endpoint is read-only and answers GET only; any other method is
             // a 404. The body is read through a bounded buffer: a wrong or hostile
             // reply cannot make this process hold an unbounded string.
-            let! reply, _ = worker.SendAsync("GET", "/status", [], (fun _ _ -> Task.CompletedTask), ct)
+            // The admin panel needs the full snapshot: per-route strategy graphs,
+            // per-model channels, and per-account units. `/status` is the
+            // whitelisted aggregate for the public report, so it is not enough.
+            let! reply, _ = worker.SendAsync("GET", "/admin-status", [], (fun _ _ -> Task.CompletedTask), ct)
             use reply = reply
             if not reply.IsSuccessStatusCode then return None
             else
                 use! stream = reply.Content.ReadAsStreamAsync(ct)
-                use body = new System.IO.MemoryStream(4096)
+                use body = new System.IO.MemoryStream(16384)
                 let chunk = Array.zeroCreate<byte> 8192
                 let mutable total = 0
                 let mutable overflow = false
@@ -247,7 +250,7 @@ module Omp =
                     if read = 0 then reading <- false
                     else
                         total <- total + read
-                        if total > 65536 then
+                        if total > 524288 then
                             // Stop at the first byte past the limit. The rest of the
                             // reply is discarded with the response, never buffered.
                             overflow <- true

@@ -1,0 +1,11 @@
+<Project>
+
+  <!-- .NET SDK 10.0.114 ships without the prune-package data for
+       Microsoft.AspNetCore.App, so any build or restore fails with NETSDK1226 on
+       a clean machine. The property only silences that lookup; it changes no
+       output. Remove this file once the SDK ships the data again. -->
+  <PropertyGroup>
+    <AllowMissingPrunePackageData>true</AllowMissingPrunePackageData>
+  </PropertyGroup>
+
+</Project>

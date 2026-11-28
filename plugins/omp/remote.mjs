@@ -240,6 +240,22 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
           return encodePublicSummary(buildPublicSummary(null, { reason: "路由统计读取失败" }), limit)
         }
       },
+      /// The full snapshot for the admin panel: per-route strategy graphs,
+      /// per-model channels, and per-account units. It lives here because
+      /// only this closure holds `routing`; the public `/status` projection
+      /// above stays the only document that can reach a shared report.
+      statusSnapshot() {
+        try {
+          const view = routing?.router?.statusView?.();
+          if (!view) return JSON.stringify({ available: false, reason: "路由统计未启用" });
+          // The bridge reads `available` as the "this is a snapshot, not an
+          // error page" marker. The snapshot itself has no such field, so it
+          // is added here instead of teaching the bridge a second shape.
+          return JSON.stringify({ ...view, available: true });
+        } catch {
+          return JSON.stringify({ available: false, reason: "路由统计读取失败" });
+        }
+      },
       async handle(request) {
         const url = new URL(request.url);
         if (request.method !== "POST" || url.search || !PATHS.has(url.pathname)) return Response.json({ error: "Unknown completion route." }, { status: 404 });
@@ -366,6 +382,23 @@ async function main() {
             return chunkedResponse(Response.json({ error: "Unknown status route." }, { status: 404 }));
           }
           return chunkedResponse(new Response(app.statusSummary(), {
+            status: 200, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+          }));
+        }
+        // The full operational snapshot, for the admin panel only. The public
+        // `/status` above is a whitelisted aggregate; this route keeps every
+        // per-route, per-model, and per-account row. It is safe on this path
+        // because the socket is 0600 and owned by the server account, and the
+        // F# side serves the reply only behind an authenticated admin session.
+        if (url.pathname === "/admin-status" && (request.method === "GET" || request.method === "POST")) {
+          if (url.search) return chunkedResponse(Response.json({ error: "Unknown status route." }, { status: 404 }));
+          if (Number(request.headers.get("content-length") ?? "0") > 0) {
+            return chunkedResponse(Response.json({ error: "Unknown status route." }, { status: 404 }));
+          }
+          // `routing` is bound inside createRemoteGateway, not here, so the
+          // snapshot has to come from the app object that closes over it.
+          const text = app.statusSnapshot();
+          return chunkedResponse(new Response(text, {
             status: 200, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
           }));
         }
