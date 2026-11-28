@@ -174,6 +174,11 @@ module ManagementTests =
         Assert.Equal(HttpStatusCode.OK, report.StatusCode)
         let! publicBody = text running report
         use document = JsonDocument.Parse(publicBody)
+        // Storage health is a process-wide fact, not a user measurement.
+        let store = document.RootElement.GetProperty("store")
+        Assert.True(store.GetProperty("available").GetBoolean())
+        Assert.Equal("file", store.GetProperty("mode").GetString())
+        Assert.Equal(24L, int64 (store.GetProperty("keepHours").GetInt32()))
         let row = document.RootElement.GetProperty("users")[0]
         Assert.Equal(nickname, row.GetProperty("nickname").GetString())
         Assert.Equal(1L, row.GetProperty("requests").GetInt64())
@@ -202,6 +207,11 @@ module ManagementTests =
         Assert.DoesNotContain(id, html, StringComparison.Ordinal)
         Assert.DoesNotContain("innerHTML", html, StringComparison.Ordinal)
         Assert.Contains("/assets/", html, StringComparison.Ordinal)
+        // The shell CSP has no unsafe-inline: an inline style would be dropped silently.
+        // The skip link and its focus target must survive, because CSP forbids styling them inline.
+        Assert.DoesNotContain("style=", html, StringComparison.Ordinal)
+        Assert.Contains("class=\"skip-link\"", html, StringComparison.Ordinal)
+        Assert.Contains("id=\"main-content\"", html, StringComparison.Ordinal)
         let start = html.IndexOf("/assets/", StringComparison.Ordinal)
         let finish = html.IndexOf('"', start)
         let asset = html.Substring(start, finish - start)

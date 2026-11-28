@@ -427,6 +427,15 @@ export function normalizeRouting(root) {
   return {
     available: source.available !== false,
     reason: typeof source.reason === 'string' ? source.reason : null,
+    store: storeOf(source.store),
+    epoch: epochOf(source.epoch ?? source.epochSince),
+    workers: workersOf(source.workers),
+    capacity: tableRowsOf(source.capacity),
+    health: tableRowsOf(source.health),
+    routes: routesOf(source.routes),
+    diagnostics: diagnosticsOf(source.diagnostics),
+    notices: noticesOf(source.notices),
+    tokenModels: tokenModelsOf(source.tokenTotals ?? source.aggregate?.tokens),
     meta,
     aggregate,
     groups,
@@ -489,4 +498,432 @@ export function mergedSeries(data, limit = 24) {
   // window. Null: no user reported a series at all.
   if (!reported) return null
   return [...map.values()].sort((a, b) => a.at - b.at).slice(-limit)
+}
+
+
+// ---------------------------------------------------------------------------
+// Whole-site aggregates, table ordering, hourly rates, and CSV export.
+// Each reader keeps the page's one rule: an unreported value is null, not zero.
+
+/// Merge one bucket set across every user that reported it. Labels and
+/// midpoints come from the first reporter, so a server-side boundary change
+/// stays visible instead of being averaged away.
+function mergedHistogram(users, pick) {
+  let base = null
+  const counts = new Map()
+  for (const user of users) {
+    const rows = pick(user)
+    if (!Array.isArray(rows) || rows.length === 0) continue
+    if (base === null) base = rows
+    for (const row of rows) {
+      const value = num(row.count)
+      if (value === null) continue
+      counts.set(row.key, (counts.get(row.key) ?? 0) + value)
+    }
+  }
+  if (base === null) return null
+  return base.map((row) => ({
+    key: row.key,
+    label: row.label,
+    mark: num(row.mark),
+    count: counts.has(row.key) ? counts.get(row.key) : null,
+  }))
+}
+
+/// Sum one counter across the rows that reported it. A counter every row omits
+/// stays null: an empty sum would read as a real zero.
+function mergedSum(users, key) {
+  let reported = false
+  let total = 0
+  for (const user of users) {
+    const value = num(user[key])
+    if (value === null) continue
+    reported = true
+    total += value
+  }
+  return reported ? total : null
+}
+
+function latestSeen(users) {
+  let latest = null
+  for (const user of users) {
+    const value = typeof user.lastSeen === 'string' ? user.lastSeen : null
+    if (value === null || Number.isNaN(new Date(value).getTime())) continue
+    if (latest === null || value > latest) latest = value
+  }
+  return latest
+}
+
+/// The site-wide view of the public report. Histograms are summed per bucket;
+/// classes the server never sent stay null. Concurrency peaks are not additive,
+/// so the site value is the largest single-user peak and nothing more.
+export function aggregateReportStats(data) {
+  const users = data && Array.isArray(data.users) ? data.users : []
+  const completed = mergedSum(users, 'completed')
+  const succeeded = mergedSum(users, 'succeeded')
+  const durationMs = mergedSum(users, 'durationMs')
+  const latency = mergedHistogram(users, (user) => user.latency)
+  let peakActive = null
+  for (const user of users) {
+    const value = num(user.peakActive)
+    if (value === null) continue
+    peakActive = peakActive === null ? value : Math.max(peakActive, value)
+  }
+  return {
+    users: users.length,
+    requests: mergedSum(users, 'requests'),
+    succeeded,
+    failed: mergedSum(users, 'failed'),
+    canceled: mergedSum(users, 'canceled'),
+    active: mergedSum(users, 'active'),
+    completed,
+    requestBytes: mergedSum(users, 'requestBytes'),
+    responseBytes: mergedSum(users, 'responseBytes'),
+    durationMs,
+    averageMs: completed && completed > 0 && durationMs !== null ? durationMs / completed : null,
+    successRate: completed && completed > 0 && succeeded !== null ? succeeded / completed : null,
+    streamed: mergedSum(users, 'streamed'),
+    buffered: mergedSum(users, 'buffered'),
+    peakActive,
+    latency,
+    headersLatency: mergedHistogram(users, (user) => user.headersLatency),
+    statusBuckets: mergedHistogram(users, (user) => user.statusBuckets),
+    kinds: mergedHistogram(users, (user) => user.kinds),
+    percentiles: percentiles(latency),
+    lastSeen: latestSeen(users),
+  }
+}
+
+/// Columns the usage table can order by, in display order.
+export const SORT_COLUMNS = [
+  { key: 'requests', label: '请求数' },
+  { key: 'failed', label: '失败数' },
+  { key: 'averageMs', label: '平均耗时' },
+  { key: 'p95', label: 'p95 估算' },
+  { key: 'traffic', label: '总流量' },
+  { key: 'lastSeen', label: '最近活动' },
+  { key: 'nickname', label: '昵称' },
+]
+
+function trafficOf(user) {
+  const values = [user.requestBytes, user.responseBytes].filter((value) => num(value) !== null)
+  return values.length > 0 ? sum(values) : null
+}
+
+function sortValue(user, key) {
+  if (key === 'nickname') return typeof user.nickname === 'string' ? user.nickname : null
+  if (key === 'lastSeen') return typeof user.lastSeen === 'string' ? user.lastSeen : null
+  if (key === 'traffic') return trafficOf(user)
+  if (key === 'p95') return user.percentiles ? num(user.percentiles.p95) : null
+  return num(user[key])
+}
+
+/// Pure ordering for the usage table. Unknown values sort last in both
+/// directions: a row with no reported value is neither best nor worst.
+/// Ties keep their incoming order, so a second click never shuffles the list.
+export function sortUsers(users, key, direction = 'desc') {
+  const list = Array.isArray(users) ? users : []
+  const sign = direction === 'asc' ? 1 : -1
+  return list
+    .map((user, index) => ({ user, index, value: sortValue(user, key) }))
+    .sort((a, b) => {
+      if (a.value === null && b.value === null) return a.index - b.index
+      if (a.value === null) return 1
+      if (b.value === null) return -1
+      const order = typeof a.value === 'string'
+        ? a.value.localeCompare(b.value, 'zh-CN')
+        : a.value - b.value
+      return order === 0 ? a.index - b.index : sign * order
+    })
+    .map((entry) => entry.user)
+}
+
+/// Row filters for the usage table. `active` and `failing` select rows that
+/// reported something; a row that reported nothing is in neither group.
+export const FILTER_MODES = [
+  { key: 'all', label: '全部' },
+  { key: 'active', label: '进行中' },
+  { key: 'failing', label: '有失败' },
+]
+
+export function filterUsers(users, { query = '', mode = 'all' } = {}) {
+  const list = Array.isArray(users) ? users : []
+  const needle = String(query ?? '').trim().toLocaleLowerCase('zh-CN')
+  return list.filter((user) => {
+    const nickname = String(user.nickname ?? '').toLocaleLowerCase('zh-CN')
+    if (needle.length > 0 && !nickname.includes(needle)) return false
+    if (mode === 'active') return (num(user.active) ?? 0) > 0
+    if (mode === 'failing') return (num(user.failed) ?? 0) > 0
+    return true
+  })
+}
+
+/// Hourly buckets merged across users, with the rates a chart needs. A bucket
+/// that completed nothing has no rate: null, never 0%.
+export function buildHourlySeries(users, limit = 24) {
+  const list = Array.isArray(users) ? users : []
+  const map = new Map()
+  let reported = false
+  for (const user of list) {
+    if (!Array.isArray(user.series)) continue
+    reported = true
+    for (const point of user.series) {
+      const existing = map.get(point.hour)
+      if (existing) {
+        existing.requests += point.requests
+        existing.succeeded += point.succeeded
+        existing.failed += point.failed
+        existing.canceled += point.canceled
+        existing.requestBytes += point.requestBytes
+        existing.responseBytes += point.responseBytes
+        existing.durationMs += point.durationMs
+      } else {
+        map.set(point.hour, { ...point })
+      }
+    }
+  }
+  if (!reported) return null
+  return [...map.values()]
+    .map((point) => {
+      const completed = point.succeeded + point.failed + point.canceled
+      return {
+        at: point.at,
+        hour: point.hour,
+        requests: point.requests,
+        succeeded: point.succeeded,
+        failed: point.failed,
+        canceled: point.canceled,
+        completed,
+        requestBytes: point.requestBytes,
+        responseBytes: point.responseBytes,
+        durationMs: point.durationMs,
+        traffic: point.requestBytes + point.responseBytes,
+        successRate: completed > 0 ? point.succeeded / completed : null,
+        averageMs: completed > 0 ? point.durationMs / completed : null,
+      }
+    })
+    .sort((a, b) => a.at - b.at)
+    .slice(0 - limit)
+}
+
+const CSV_COLUMNS = [
+  'nickname', 'requests', 'succeeded', 'failed', 'canceled', 'active', 'completed',
+  'successRatePct', 'averageMs', 'p50Ms', 'p95Ms', 'requestBytes', 'responseBytes',
+  'streamed', 'buffered', 'peakActive', 'lastSeen',
+]
+
+function csvCell(value) {
+  if (value === null || value === undefined) return ''
+  const text = typeof value === 'number' ? String(Math.round(value)) : String(value)
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+}
+
+/// One flat sheet of the public report. An unknown value is an empty cell, not
+/// a zero a spreadsheet would happily average into the total.
+export function reportToCsv(data) {
+  const users = data && Array.isArray(data.users) ? data.users : []
+  const lines = [CSV_COLUMNS.join(',')]
+  for (const user of users) {
+    const percentilesOfUser = user.percentiles
+    lines.push([
+      user.nickname,
+      user.requests,
+      user.succeeded,
+      user.failed,
+      user.canceled,
+      user.active,
+      user.completed,
+      num(user.successRate) === null ? null : user.successRate * 100,
+      user.averageMs,
+      percentilesOfUser ? percentilesOfUser.p50 : null,
+      percentilesOfUser ? percentilesOfUser.p95 : null,
+      user.requestBytes,
+      user.responseBytes,
+      user.streamed,
+      user.buffered,
+      user.peakActive,
+      user.lastSeen,
+    ].map(csvCell).join(','))
+  }
+  return `${lines.join('\n')}\n`
+}
+
+// ---------------------------------------------------------------------------
+// Structured routing sections. Each section keeps the server's own shape; a
+// missing array is null (not reported), an empty one is [] (reported, empty).
+
+const ROW_LABELS = {
+  account: '账号', state: '状态', status: '状态', held: '已占用',
+  maxInFlight: '并发上限', max: '上限', inFlight: '在途',
+  nextProbe: '下次探测', nextProbeIn: '下次探测', coolingReason: '冷却原因',
+  reason: '原因', worker: '工作进程', model: '模型', route: '路由',
+  strategy: '策略', channels: '通道', available: '可用', error: '错误',
+  heartbeatMs: '心跳', stale: '过期', version: '版本', tokens: 'token',
+}
+
+function cellText(key, value) {
+  if (num(value) !== null) return /ms$/i.test(key) ? fmtDuration(value) : fmtInt(value)
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  if (typeof value === 'string') return value.length > 0 ? value : '—'
+  return '—'
+}
+
+/// A capacity or health table: `rows` when the server sends a structured table,
+/// otherwise null. Every scalar cell is kept under a Chinese label when one is
+/// known and its own key otherwise, so an extra field is visible, not dropped.
+function tableRowsOf(source) {
+  const raw = objectOf(source)
+  if (raw === null || !Array.isArray(raw.rows)) return null
+  return raw.rows
+    .map((item) => {
+      const row = objectOf(item)
+      if (row === null) return null
+      const cells = Object.entries(row)
+        .filter(([, value]) => value === null || ['number', 'string', 'boolean'].includes(typeof value))
+        .map(([key, value]) => ({ key, label: ROW_LABELS[key] ?? key, text: cellText(key, value) }))
+      const name = [row.account, row.label, row.model, row.route, row.id]
+        .find((value) => typeof value === 'string')
+      return { name: name ?? null, cells }
+    })
+    .filter(Boolean)
+}
+
+function storeOf(source) {
+  const raw = objectOf(source)
+  if (raw === null) return null
+  const mode = typeof raw.mode === 'string' ? raw.mode : null
+  const available = typeof raw.available === 'boolean' ? raw.available : null
+  if (mode === null && available === null) return null
+  return { mode, available, reason: typeof raw.reason === 'string' ? raw.reason : null }
+}
+
+function epochOf(source) {
+  if (typeof source === 'string') return { id: null, since: source }
+  if (num(source) !== null) return { id: null, since: String(source) }
+  const raw = objectOf(source)
+  if (raw === null) return null
+  const since = typeof raw.since === 'string'
+    ? raw.since
+    : num(raw.since) !== null ? String(raw.since) : null
+  const id = typeof raw.id === 'string' ? raw.id : null
+  if (since === null && id === null) return null
+  return { id, since }
+}
+
+function workersOf(source) {
+  if (!Array.isArray(source)) return null
+  return source
+    .map((item, index) => {
+      const raw = objectOf(item)
+      if (raw === null) return null
+      return {
+        id: typeof raw.id === 'string' ? raw.id : `worker ${index + 1}`,
+        inFlight: num(raw.inFlight),
+        heartbeatMs: num(raw.heartbeatMs) ?? num(raw.heartbeatAgeMs),
+        stale: typeof raw.stale === 'boolean' ? raw.stale : null,
+        version: typeof raw.version === 'string' ? raw.version : null,
+      }
+    })
+    .filter(Boolean)
+}
+
+function routesOf(source) {
+  if (!Array.isArray(source)) return null
+  return source
+    .map((item) => {
+      const raw = objectOf(item)
+      if (raw === null) return null
+      const channels = Array.isArray(raw.channels)
+        ? raw.channels.map((entry) => {
+            const channel = objectOf(entry)
+            if (channel === null) return null
+            return {
+              model: typeof channel.model === 'string' ? channel.model : '—',
+              state: typeof channel.state === 'string' ? channel.state : null,
+              tone: typeof channel.tone === 'string' ? `tone-${channel.tone}` : '',
+              detail: typeof channel.detail === 'string' ? channel.detail : null,
+            }
+          }).filter(Boolean)
+        : null
+      const accounts = num(raw.accounts) ?? num(raw.totalAccounts)
+      return {
+        id: typeof raw.id === 'string' ? raw.id : '—',
+        status: typeof raw.status === 'string' ? raw.status : null,
+        tone: typeof raw.tone === 'string' ? `tone-${raw.tone}` : '',
+        strategy: typeof raw.strategy === 'string' ? raw.strategy : null,
+        accounts,
+        channels,
+      }
+    })
+    .filter(Boolean)
+}
+
+function diagnosticsOf(source) {
+  const raw = objectOf(source)
+  if (raw === null) return null
+  const rows = Array.isArray(raw.rows)
+    ? raw.rows.map((item) => {
+        const row = objectOf(item)
+        if (row === null) return null
+        const pick = (...keys) => {
+          for (const key of keys) {
+            const value = num(row[key])
+            if (value !== null) return value
+          }
+          return null
+        }
+        return {
+          model: typeof row.model === 'string' ? row.model : '—',
+          complete: pick('complete', 'completeSamples'),
+          censored: pick('censored', 'censoredSamples'),
+          durationMs: pick('durationMs', 'meanDurationMs'),
+          ttft: pick('ttft', 'ttftSamples'),
+          speed: pick('speed', 'speedSamples'),
+          tokensPerSecond: pick('tokensPerSecond', 'tokensPerSec'),
+        }
+      }).filter(Boolean)
+    : null
+  const windowMinutes = num(raw.windowMinutes)
+  const available = typeof raw.available === 'boolean' ? raw.available : null
+  if (rows === null && windowMinutes === null && available === null) return null
+  return { available, windowMinutes, rows }
+}
+
+function noticesOf(source) {
+  if (!Array.isArray(source)) return null
+  return source
+    .map((item) => {
+      const raw = objectOf(item)
+      if (raw === null) return null
+      const message = typeof raw.message === 'string'
+        ? raw.message
+        : typeof raw.text === 'string' ? raw.text : null
+      if (message === null) return null
+      return { level: typeof raw.level === 'string' ? raw.level : 'info', message }
+    })
+    .filter(Boolean)
+}
+
+/// The per-model price table behind the official-value estimate. An unpriced
+/// model keeps `amount: null` and `priced: false`; it is never given a guess.
+function tokenModelsOf(source) {
+  const raw = objectOf(source)
+  if (raw === null) return null
+  const official = objectOf(raw.officialValue) ?? raw
+  if (!Array.isArray(official.models)) return null
+  const fallbackCurrency = typeof official.currency === 'string' ? official.currency : 'USD'
+  return official.models
+    .map((item) => {
+      const row = objectOf(item)
+      if (row === null) return null
+      const amount = num(row.amount) ?? num(row.value) ?? num(row.usd)
+      return {
+        model: typeof row.model === 'string' ? row.model : '—',
+        amount,
+        currency: typeof row.currency === 'string' ? row.currency : fallbackCurrency,
+        basis: typeof row.basis === 'string' ? row.basis : null,
+        priced: typeof row.priced === 'boolean' ? row.priced : amount !== null,
+      }
+    })
+    .filter(Boolean)
 }

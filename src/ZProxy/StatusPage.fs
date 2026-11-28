@@ -79,6 +79,9 @@ module StatusPage =
         let styles =
             if String.IsNullOrEmpty css then ""
             else "<link rel=\"stylesheet\" href=\"" + css + "\">"
+        // The strict CSP has no `unsafe-inline`, so the skip link carries no inline
+        // style. The frontend styles `.skip-link` (hidden until focused); without
+        // that rule it stays a plain readable link, never an invisible one.
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         + "<meta name=\"color-scheme\" content=\"light dark\">"
@@ -86,7 +89,9 @@ module StatusPage =
         + "<meta name=\"referrer\" content=\"no-referrer\">"
         + "<title>" + title + "</title>"
         + styles
-        + "</head><body data-page=\"" + page + "\"><div id=\"app\"><main class=\"boot\" aria-busy=\"true\">"
+        + "</head><body data-page=\"" + page + "\">"
+        + "<a class=\"skip-link\" href=\"#main-content\">跳到主要内容</a>"
+        + "<div id=\"app\"><main id=\"main-content\" class=\"boot\" tabindex=\"-1\" aria-busy=\"true\">"
         + "<p>正在读取统计…</p></main></div>"
         + "<noscript><p class=\"boot\">这个页面需要 JavaScript 才能显示统计。</p></noscript>"
         + "<script type=\"module\" src=\"" + js + "\"></script>"
