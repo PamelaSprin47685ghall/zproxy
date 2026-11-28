@@ -19,7 +19,9 @@ import { affinityStickiness, median, scoreCandidate } from "./ranking.mjs";
 export const PLAN_PERIOD = Object.freeze({ PEAK: "peak", OFF_PEAK: "offPeak" });
 
 const NODE_TYPES = new Set(["model", "fallback", "random", "rating"]);
-const EFFORT_LEVELS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "capped"]);
+// "passthrough" is a route entry that hands the client's own level through
+// unchanged, so it is a legal effort value here even though it is not a level.
+const EFFORT_LEVELS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "capped", "passthrough"]);
 const OFF_PEAK_SCHEDULE_DATA = offPeakPolicy.schedules ?? {};
 export const OFF_PEAK_SCHEDULES = Object.freeze(Object.keys(OFF_PEAK_SCHEDULE_DATA));
 const OFF_PEAK_SCHEDULE_SET = new Set(OFF_PEAK_SCHEDULES);

@@ -108,10 +108,16 @@ export function antigravitySchedulable(model) {
  * Add one model-only route per schedulable Antigravity model. A model the
  * plan already routes keeps its configured graph, so a plan or alias wins.
  * The graph names exactly one model: only the account may change.
+ *
+ * These routes stay reachable by name but stay out of the advertised model
+ * list, the status topology, and the routing page. The caller replaced the
+ * provider's own model names with the four lazy aliases, so a direct name is
+ * an internal fallback, not a published one.
  */
 export function planWithDirectRoutes(baseRoutes, models) {
   const routes = { ...(baseRoutes ?? {}) };
   const direct = new Set();
+  const hidden = new Set();
   for (const model of models ?? []) {
     if (!antigravitySchedulable(model)) continue;
     const ref = `${model.provider}/${model.id}`;
@@ -121,8 +127,9 @@ export function planWithDirectRoutes(baseRoutes, models) {
       graph: { type: "model", model: ref },
     };
     direct.add(ref);
+    hidden.add(ref);
   }
-  return { routes, direct };
+  return { routes, direct, hidden };
 }
 
 /** Every provider a compiled plan names. */
@@ -318,6 +325,7 @@ export async function createRemoteRouting({ config, storage, registry, dispatch,
     router.policy = fresh;
     router.planData = planData;
     router.routeSet = new Set(fresh.routeNames);
+    router.hiddenRoutes = new Set(injected.hidden);
     // Replace, never accumulate: planData is rebuilt in full, so a provider that
     // lost its last scheduled model must leave the account placeholder set too.
     router.planProviders = planProvidersOfRoutes(planData);
@@ -378,6 +386,9 @@ export async function createRemoteRouting({ config, storage, registry, dispatch,
   router = new LazyRouter({ policy, catalog, health, dispatcher, affinity, capacity, admission, perf, speed,
     store, concurrencyProof, credentials: accounts.credentials, accountDirectory, planData, emit,
     faults: new FaultInjector(settings.testFaults), settings, pinnedProviders: new Set() });
+  // The first compile ran before this router existed, so its plan and hidden set
+  // never reached it. Compile once more now; later compiles update it in place.
+  installPolicy();
   const close = async () => {
     router.dispose();
     accountDirectory.stop();

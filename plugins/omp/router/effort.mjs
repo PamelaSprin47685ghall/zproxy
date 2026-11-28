@@ -13,7 +13,13 @@
 export const EFFORT_LADDER = Object.freeze(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 /** Route-entry effort policies, besides a fixed ladder level. */
-export const EFFORT_POLICY = Object.freeze({ CAPPED: "capped", HIGH: "high" });
+export const EFFORT_POLICY = Object.freeze({
+  CAPPED: "capped",
+  HIGH: "high",
+  // Hand the client's own level through unchanged. A route that names this
+  // policy never raises, lowers, or invents an effort: the caller decides.
+  PASSTHROUGH: "passthrough",
+});
 
 /** The ceiling for a capped entry, and its level when the client sent none. */
 export const CAPPED_CEILING = "medium";
@@ -45,6 +51,7 @@ export function minEffort(left, right) {
  * @param {string|undefined} requested the client's level
  */
 export function targetEffort(policy, requested) {
+  if (policy === EFFORT_POLICY.PASSTHROUGH) return requested;
   if (isEffortLevel(policy)) return policy;
   if (policy !== EFFORT_POLICY.CAPPED) return UNCAPPED_LEVEL;
   return isEffortLevel(requested) ? minEffort(requested, CAPPED_CEILING) : CAPPED_CEILING;
@@ -75,9 +82,19 @@ export function supportedLevels(traits) {
   return EFFORT_LADDER.filter((level) => levels.has(level));
 }
 
-/** Both steps: the effort to send for one candidate. */
+/**
+ * Both steps: the effort to send for one candidate. A passthrough entry
+ * skips the second step: fitting the level down to what the model lists
+ * would rewrite the client's own choice.
+ */
 export function resolveEffort({ policy, requested, traits }) {
+  if (policy === EFFORT_POLICY.PASSTHROUGH) return requested;
   return fitEffort(targetEffort(policy, requested), traits);
+}
+
+/** True when a route entry hands the client's effort through unchanged. */
+export function isPassthrough(policy) {
+  return policy === EFFORT_POLICY.PASSTHROUGH;
 }
 
 /** The effort a probe sends: as little as the model allows. */

@@ -240,10 +240,13 @@ test("direct route injection keeps a configured route and ignores an unschedulab
     graph: { type: "model", model: "google-antigravity/added" },
   });
   expect([...injected.direct]).toEqual(["google-antigravity/added"]);
+  // An injected direct route stays callable by name but is never advertised.
+  expect([...injected.hidden]).toEqual(["google-antigravity/added"]);
   // A model the catalog gains later joins its own route on the next compile.
   const later = planWithDirectRoutes(configuredRoutes, [...models,
     { provider: "google-antigravity", id: "late", contextWindow: 4000, maxTokens: 400 }]);
   expect([...later.direct].sort()).toEqual(["google-antigravity/added", "google-antigravity/late"]);
+  expect([...later.hidden].sort()).toEqual(["google-antigravity/added", "google-antigravity/late"]);
   expect([...planProvidersOfRoutes(later)].sort()).toEqual(["fixture", "google-antigravity"]);
 });
 

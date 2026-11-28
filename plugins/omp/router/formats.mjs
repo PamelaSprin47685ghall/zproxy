@@ -196,10 +196,13 @@ export function providerOf(model) {
  * @param {object} body parsed client body, left untouched at the top level
  * @param {{model: string, effort: string|undefined, maxTokens: number}} target
  */
-export function rewriteBody(format, body, { model, effort, maxTokens }) {
+export function rewriteBody(format, body, { model, effort, maxTokens, preserveEffort = false }) {
   const next = { ...body };
   next.model = model;
-  format.writeEffort(next, effort);
+  // A passthrough route keeps the client's own thinking fields. Writing them
+  // back is not the same thing: some writers delete a field when the level is
+  // absent, and the Anthropic writer rewrites `thinking` from `output_config`.
+  if (!preserveEffort) format.writeEffort(next, effort);
   format.writeMaxTokens(next, maxTokens);
   format.requestUsage?.(next);
   if (providerOf(model) === "google-antigravity") sanitizeAntigravityBody(next);

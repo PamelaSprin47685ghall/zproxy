@@ -1,16 +1,15 @@
 {
-  "$comment": "Default composable route preset: keyed-model leaves, fallback, random and rating nodes. All time windows are UTC; Mainland China public holidays come from holidays-cn.json. Policy data lives in presets: model references and tiers here, ranking weights in ranking.json, vendor off-peak schedules in offpeak.json, and pricing in rates.json. clientOnlyPrefix is the route-id namespace the Lazy Router owns. No concrete model id, model-family pattern, route-id prefix, off-peak schedule, or ranking weight is hardcoded in routing code.",
+  "$comment": "Default composable route preset: keyed-model leaves, fallback, random and rating nodes. All time windows are UTC; Mainland China public holidays come from holidays-cn.json. Policy data lives in presets: model references and tiers here, ranking weights in ranking.json, vendor off-peak schedules in offpeak.json, and pricing in rates.json. clientOnlyPrefix is the route-id namespace the Lazy Router owns. No concrete model id, model-family pattern, route-id prefix, off-peak schedule, or ranking weight is hardcoded in routing code. Effort is passthrough on every route node: the client's reasoning/thinking level is preserved.",
   "contextWindow": 500000,
   "maxOutputTokens": 64000,
   "clientOnlyPrefix": "lazy/",
   "modelTraits": {
-    "$comment": "Minimal capability corrections for channels whose models.yml entry omits them. kuaipao/claude-sonnet-5-5 is the same model id as commandcode/claude-sonnet-5-5, whose live catalog row declares contextWindow 1000000, maxTokens 65536, and text+image input. The route asks for medium reasoning, so the correction declares that level.",
+    "$comment": "Minimal capability corrections for channels whose models.yml entry omits them. kuaipao/claude-sonnet-5-5 is the same model id as commandcode/claude-sonnet-5-5, whose live catalog row declares contextWindow 1000000, maxTokens 65536, and text+image input. No effort list is declared: every route passes the requested reasoning level through.",
     "kuaipao/claude-sonnet-5-5": {
       "contextWindow": 1000000,
       "maxTokens": 65536,
       "input": ["text", "image"],
-      "reasoning": true,
-      "efforts": ["medium"]
+      "reasoning": true
     }
   },
   "providerHeaderTimeouts": {
@@ -18,136 +17,104 @@
   },
   "maxInFlight": {
     "ollama-cloud": 3,
-    "charm-hyper": 2,
     "mistral/deepseek-v4-1-flash-1017": 60,
     "mistral/zai-glm-5-3-flash": 60
   },
   "peakWindows": [{ "from": "09:00", "to": "12:00" }, { "from": "14:00", "to": "18:00" }],
   "routes": {
-    "lazy/pro": {
-      "displayName": "Lazy Pro",
+    "lazy/argon": {
+      "displayName": "Lazy Argon · Gemini Fallback",
       "graph": {
-        "type": "rating",
+        "type": "fallback",
         "children": [
           {
             "type": "model",
-            "model": "kiro/claude-opus-5-5",
-            "effort": "medium"
+            "model": "google-antigravity/gemini-4-neon",
+            "effort": "passthrough"
           },
           {
             "type": "model",
-            "model": "google-antigravity/claude-opus-5-5",
-            "tier": "ultra",
-            "effort": "medium"
+            "model": "google-antigravity/gemini-4-hydrogen",
+            "effort": "passthrough"
           },
           {
-            "type": "fallback",
-            "children": [
-              {
-                "type": "model",
-                "model": "google-antigravity/gemini-4-argon",
-                "tier": "ultra",
-                "effort": "medium"
-              },
-              {
-                "type": "model",
-                "model": "google-antigravity/gemini-4-argon",
-                "tier": "pro",
-                "effort": "medium"
-              }
-            ]
+            "type": "model",
+            "model": "google-antigravity/gemini-4-argon",
+            "effort": "passthrough"
           }
         ]
       }
     },
-    "lazy/weak": {
-      "displayName": "Lazy Weak",
-      "contextWindow": 250000,
-      "maxOutputTokens": 32768,
+    "lazy/sonnet": {
+      "displayName": "Lazy Sonnet · Claude Sonnet 5.5",
       "graph": {
-        "type": "model",
-        "model": "mistral/mistral-small-latest",
-        "effort": "high"
+        "type": "fallback",
+        "children": [
+          {
+            "type": "model",
+            "model": "kiro/claude-sonnet-5-5",
+            "effort": "passthrough"
+          },
+          {
+            "type": "model",
+            "model": "google-antigravity/claude-sonnet-5-5",
+            "effort": "passthrough"
+          },
+          {
+            "type": "model",
+            "model": "kuaipao/claude-sonnet-5-5",
+            "effort": "passthrough"
+          }
+        ]
       }
     },
-    "lazy/default": {
-      "displayName": "Lazy Default · Terra Medium (Plus → Pro → API Flex)",
+    "lazy/terra": {
+      "displayName": "Lazy Terra · GPT-6.1 Terra",
       "graph": {
         "type": "fallback",
         "children": [
           {
             "type": "model",
             "model": "openai-codex/gpt-6.1-terra",
-            "tier": "plus",
-            "effort": "medium"
-          },
-          {
-            "type": "model",
-            "model": "openai-codex/gpt-6.1-terra",
-            "tier": "pro",
-            "effort": "medium"
+            "effort": "passthrough"
           },
           {
             "type": "model",
             "model": "openai-api/gpt-6.1-terra",
-            "effort": "medium"
+            "effort": "passthrough"
           }
         ]
       }
     },
-    "lazy/task": {
-      "displayName": "Lazy Task · DeepSeek (competitive)",
+    "lazy/deepseek": {
+      "displayName": "Lazy DeepSeek · Competitive",
       "graph": {
         "type": "rating",
         "children": [
           {
             "type": "model",
             "model": "mistral/deepseek-v4-1-flash-1017",
-            "effort": "max"
-          },
-          {
-            "type": "model",
-            "model": "charm-hyper/deepseek-v4.1-flash-1017",
-            "effort": "max"
-          },
-          {
-            "type": "model",
-            "model": "opencode-go/deepseek-v4.1-flash",
-            "effort": "max",
-            "offPeakOnly": "deepseek"
+            "effort": "passthrough"
           },
           {
             "type": "model",
             "model": "ollama-cloud/deepseek-v4.1-flash:1017",
-            "effort": "max",
+            "effort": "passthrough",
             "offPeakOnly": "ollama"
           },
           {
             "type": "model",
             "model": "cline-pass/deepseek-v4.1-flash-1017",
-            "effort": "max",
+            "effort": "passthrough",
             "offPeakOnly": "deepseek"
           },
           {
             "type": "model",
-            "model": "ctyun/deepseek-v4.1-flash",
-            "effort": "max"
-          },
-          {
-            "type": "model",
             "model": "commandcode/deepseek/deepseek-v4.1-flash",
-            "effort": "max",
+            "effort": "passthrough",
             "offPeakOnly": "commandcode"
           }
         ]
-      }
-    },
-    "lazy/paid": {
-      "displayName": "Lazy Paid · Claude Sonnet 5.5",
-      "graph": {
-        "type": "model",
-        "model": "kuaipao/claude-sonnet-5-5",
-        "effort": "medium"
       }
     }
   }

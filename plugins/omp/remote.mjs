@@ -157,6 +157,9 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
     features = await createRemoteFeatures({ config, storage, registry, fetch: testFetch });
     let index;
     const disabled = new Set(config.disabledProviders);
+    // A direct Antigravity model id still resolves and still serves. It is only
+    // left out of the advertised list: the caller publishes the lazy aliases.
+    const hiddenProviders = new Set(config.antigravity2api ? ["google-antigravity"] : []);
     let refreshing;
     const refresh = () => refreshing ??= (async () => {
       await storage.credentials.poll();
@@ -179,7 +182,9 @@ export async function createRemoteGateway(input, { fetch: testFetch, routingFact
       headerTimeoutMs: config.headerTimeoutMs, idleTimeoutMs: config.idleTimeoutMs,
     });
     gateway = createAuthGatewayRouter({
-      storage, resolveModel, listModels: () => index.models, excludeProviders: disabled,
+      storage, resolveModel,
+      listModels: () => index.models.filter(model => !hiddenProviders.has(model.provider)),
+      excludeProviders: disabled,
       fetch: testFetch,
       rawResponseHandoff(turn) {
         applyMistralRequestOptions(turn);

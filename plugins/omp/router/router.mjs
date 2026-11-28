@@ -28,7 +28,7 @@ import { canonicalBytes, prefixDigests } from "./canonical.mjs";
 import { InFlightTracker } from "./capacity.mjs";
 import { CyclicSpeed } from "./cyclic-speed.mjs";
 import { GatewayDispatcher } from "./dispatcher.mjs";
-import { probeEffort, resolveEffort } from "./effort.mjs";
+import { isPassthrough, probeEffort, resolveEffort } from "./effort.mjs";
 import { CLIENT_CLOSED_STATUS, classifyFailure, FAILURE, requestContextRequirement } from "./failures.mjs";
 import { FAULT_KIND } from "./faults.mjs";
 import { containsImage, formatForPath, probeBody, rewriteBody } from "./formats.mjs";
@@ -380,6 +380,9 @@ export class LazyRouter {
     this.now = now;
     this.pinnedProviders = pinnedProviders;
     this.routeSet = new Set(Array.isArray(policy.routeNames) ? policy.routeNames : []);
+    // A direct Antigravity model the plan injects stays callable by its own name,
+    // but only the lazy aliases are published. Every listing filters these out.
+    this.hiddenRoutes = new Set();
     this.planProviders = planProvidersOf(planData);
     this.probesInFlight = new Map();
     this.probeTimers = new Map();
@@ -446,9 +449,11 @@ export class LazyRouter {
     };
   }
 
-  /** /v1/models entries for the lazy routes. */
+  /** /v1/models entries for the published routes. */
   advertisedModels() {
-    return [...this.routeSet].map((routeId) => {
+    return [...this.routeSet]
+      .filter((routeId) => !this.hiddenRoutes?.has(routeId))
+      .map((routeId) => {
       const info = this.routeInfo(routeId);
       return {
         id: this.modelIdOf(routeId),
@@ -1021,11 +1026,12 @@ export class LazyRouter {
   async #serveWith(candidate, slot, context) {
     const { route, info, period, format, body, request, requested } = context;
     const traits = this.catalog.find(candidate.model);
-    const effort = resolveEffort({
-      policy: candidate.effort,
-      requested,
-      traits,
-    });
+    // A passthrough entry sends the caller's own level, even when it is
+    // absent: the route must not upgrade a request the client left open.
+    const passthrough = isPassthrough(candidate.effort);
+    const effort = passthrough
+      ? requested
+      : resolveEffort({ policy: candidate.effort, requested, traits });
     const where = { route, period, unit: candidate.unit.label, model: candidate.model };
     this.emit("route", {
       ...where,
@@ -1059,6 +1065,7 @@ export class LazyRouter {
         model: candidate.model,
         effort,
         maxTokens: info.maxOutputTokens,
+        preserveEffort: passthrough,
       });
       try {
         outcome = await this.#attempt(candidate, traits, format, request, payload, attemptSlot);
@@ -1474,6 +1481,7 @@ export class LazyRouter {
     const topology = this.#topology();
     const routes = [];
     for (const routeId of this.routeSet) {
+      if (this.hiddenRoutes?.has(routeId)) continue;
       const info = this.routeInfo(routeId);
       const channels = [];
       const byModel = new Map();
@@ -1661,7 +1669,7 @@ export class LazyRouter {
     };
     const out = {};
     for (const [routeId, route] of Object.entries(this.planData?.routes ?? {})) {
-      if (!this.routeSet.has(routeId)) continue;
+      if (!this.routeSet.has(routeId) || this.hiddenRoutes?.has(routeId)) continue;
       out[routeId] = { graph: visit(route.graph) };
     }
     return out;

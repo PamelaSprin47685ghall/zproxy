@@ -66,41 +66,6 @@
       "source": "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
       "basis": "OpenAI API Flex（不含长上下文加价）"
     },
-    "ctyun/glm-5.3-oc": {
-      "input": 1.4,
-      "cached": 0.26,
-      "output": 4.4,
-      "source": "https://docs.z.ai/guides/overview/pricing",
-      "basis": "Z.ai GLM-5.3 官方 API 参考价；CTYun -oc 通道非实际账单"
-    },
-    "ctyun/glm-5.3-flash": {
-      "input": 0.15,
-      "cached": 0.03,
-      "output": 0.5,
-      "source": "https://docs.z.ai/guides/overview/pricing",
-      "basis": "Z.ai GLM-5.3-Flash 官方 API 参考价；非 CTYun 账单"
-    },
-    "ctyun/deepseek-v4.1-flash": {
-      "input": 0.3,
-      "cached": 0.006,
-      "output": 1.2,
-      "source": "https://api-docs.deepseek.com/quick_start/pricing/",
-      "basis": "DeepSeek 官方高峰参考价；非 CTYun 账单"
-    },
-    "charm-hyper/deepseek-v4.1-flash-1017": {
-      "input": 0.3,
-      "cached": 0.006,
-      "output": 1.2,
-      "source": "https://api-docs.deepseek.com/quick_start/pricing/",
-      "basis": "DeepSeek 官方高峰参考价；非渠道账单"
-    },
-    "opencode-go/deepseek-v4.1-flash": {
-      "input": 0.3,
-      "cached": 0.006,
-      "output": 1.2,
-      "source": "https://api-docs.deepseek.com/quick_start/pricing/",
-      "basis": "DeepSeek 官方高峰参考价；非渠道账单"
-    },
     "commandcode/deepseek/deepseek-v4.1-flash": {
       "input": 0.3,
       "cached": 0.006,
@@ -121,6 +86,13 @@
       "output": 1.2,
       "source": "https://api-docs.deepseek.com/quick_start/pricing/",
       "basis": "DeepSeek 官方高峰参考价；非渠道账单"
+    },
+    "kiro/claude-sonnet-5-5": {
+      "input": 3.0,
+      "cached": 0.3,
+      "output": 15.0,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "basis": "Anthropic API 标准等效"
     },
     "kiro/claude-opus-5-5": {
       "input": 4.0,
