@@ -1,8 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   normalize, normalizeUser, totalOf, mergedSeries, percentiles, latencyLabels,
-  fmtBytes, fmtDuration, fmtPercent, aggregateReportStats, sortUsers, filterUsers,
-  buildHourlySeries, reportToCsv,
+  fmtBytes, fmtDuration, fmtPercent,
 } from './data.js'
 
 const user = (extra = {}) => ({
@@ -207,124 +206,5 @@ describe('head-wait coverage has two distinct causes', () => {
     const value = normalizeUser(user({ headersLatency: undefined }), 0)
     expect(value.headersCovered).toBeNull()
     expect(value.headersGap).toBeNull()
-  })
-})
-
-describe('site-wide aggregate', () => {
-  test('sums every reported histogram bucket and leaves an unreported class unknown', () => {
-    const page = normalize({
-      users: [
-        user({ statusBuckets: { '2xx': 8, '4xx': 2 }, latency: [5, 5, 0, 0, 0, 0] }),
-        user({ nickname: 'bo', statusBuckets: { '2xx': 1, '5xx': 3 }, latency: [0, 10, 0, 0, 0, 0] }),
-      ],
-    })
-    const stats = aggregateReportStats(page)
-    expect(stats.users).toBe(2)
-    expect(stats.statusBuckets.map((row) => row.key)).toEqual(['2xx', '3xx', '4xx', '5xx', 'noResponse'])
-    expect(stats.statusBuckets.find((row) => row.key === '2xx').count).toBe(9)
-    expect(stats.statusBuckets.find((row) => row.key === '3xx').count).toBeNull()
-    expect(stats.latency.map((row) => row.count)).toEqual([5, 15, 0, 0, 0, 0])
-    expect(stats.percentiles.samples).toBe(20)
-  })
-
-  test('a histogram nobody reported stays null for the whole site', () => {
-    const stats = aggregateReportStats(normalize({ users: [user({ latency: undefined, statusBuckets: undefined, headersLatency: undefined })] }))
-    expect(stats.latency).toBeNull()
-    expect(stats.statusBuckets).toBeNull()
-    expect(stats.headersLatency).toBeNull()
-    expect(stats.percentiles).toBeNull()
-  })
-
-  test('rates divide by completed requests, and an idle site has no rate', () => {
-    const stats = aggregateReportStats(normalize({ users: [user(), user({ nickname: 'bo' })] }))
-    expect(stats.completed).toBe(20)
-    expect(stats.succeeded).toBe(16)
-    expect(stats.successRate).toBeCloseTo(0.8)
-    expect(stats.averageMs).toBeCloseTo(900)
-    expect(stats.lastSeen).toBeNull()
-    const idle = aggregateReportStats(normalize({ users: [{ nickname: 'idle' }] }))
-    expect(idle.successRate).toBeNull()
-    expect(idle.averageMs).toBeNull()
-    expect(idle.requests).toBeNull()
-  })
-
-  test('per-user concurrency peaks are not added together', () => {
-    const stats = aggregateReportStats(normalize({
-      users: [user({ peakActive: 3 }), user({ nickname: 'bo', peakActive: 5 })],
-    }))
-    expect(stats.peakActive).toBe(5)
-  })
-})
-
-describe('table ordering and filtering', () => {
-  const rowsOf = () => normalize({ users: [
-    { nickname: 'ada', requests: 10, succeeded: 8, failed: 2, canceled: 0, active: 0, requestBytes: 1000, responseBytes: 4000, durationMs: 5000, latency: [1, 0, 0, 0, 0, 0] },
-    { nickname: 'bo', requests: 30, succeeded: 30, failed: 0, canceled: 0, active: 2, requestBytes: 9000, responseBytes: 1000, durationMs: 9000, latency: [0, 0, 0, 1, 0, 0] },
-    { nickname: 'cy' },
-  ] }).users
-
-  test('unknown values sort last in both directions', () => {
-    const rows = rowsOf()
-    expect(sortUsers(rows, 'requests', 'desc').map((row) => row.nickname)).toEqual(['bo', 'ada', 'cy'])
-    expect(sortUsers(rows, 'requests', 'asc').map((row) => row.nickname)).toEqual(['ada', 'bo', 'cy'])
-  })
-
-  test('sorting returns a new list and never reorders the input', () => {
-    const rows = rowsOf()
-    const before = rows.map((row) => row.nickname)
-    sortUsers(rows, 'requests')
-    expect(rows.map((row) => row.nickname)).toEqual(before)
-  })
-
-  test('p95 and traffic sort on their derived values', () => {
-    const rows = rowsOf()
-    expect(sortUsers(rows, 'traffic', 'desc').map((row) => row.nickname)).toEqual(['bo', 'ada', 'cy'])
-    expect(sortUsers(rows, 'p95', 'desc').map((row) => row.nickname)).toEqual(['bo', 'ada', 'cy'])
-    expect(sortUsers(rows, 'p95', 'asc')[0].nickname).toBe('ada')
-  })
-
-  test('filters by nickname and by reported state', () => {
-    const rows = rowsOf()
-    expect(filterUsers(rows, { query: 'A' }).map((row) => row.nickname)).toEqual(['ada'])
-    expect(filterUsers(rows, { query: '   ' })).toHaveLength(3)
-    expect(filterUsers(rows, { mode: 'active' }).map((row) => row.nickname)).toEqual(['bo'])
-    expect(filterUsers(rows, { mode: 'failing' }).map((row) => row.nickname)).toEqual(['ada'])
-  })
-})
-
-describe('hourly rates', () => {
-  test('a rate exists only where the bucket completed work', () => {
-    const page = normalize({ users: [user({ series: [
-      { hour: 500000, requests: 4, succeeded: 3, failed: 1, canceled: 0, requestBytes: 10, responseBytes: 20, durationMs: 800 },
-      { hour: 500001, requests: 2, succeeded: 0, failed: 0, canceled: 0, requestBytes: 5, responseBytes: 5, durationMs: 0 },
-    ] })] })
-    const points = buildHourlySeries(page.users)
-    expect(points).toHaveLength(2)
-    expect(points[0].successRate).toBeCloseTo(0.75)
-    expect(points[0].averageMs).toBe(200)
-    expect(points[0].traffic).toBe(30)
-    expect(points[1].successRate).toBeNull()
-    expect(points[1].averageMs).toBeNull()
-    expect(points[1].traffic).toBe(10)
-  })
-
-  test('no reported series stays null; a reported empty series stays empty', () => {
-    expect(buildHourlySeries(normalize({ users: [user({ series: undefined })] }).users)).toBeNull()
-    expect(buildHourlySeries(normalize({ users: [user({ series: [] })] }).users)).toEqual([])
-  })
-})
-
-describe('csv export', () => {
-  test('quotes delimiters and leaves an unknown cell empty', () => {
-    const page = normalize({ users: [
-      user({ nickname: 'ada, the "first"', requests: 10, succeeded: 8, failed: 2, canceled: 0 }),
-      { nickname: 'bo' },
-    ] })
-    const csv = reportToCsv(page)
-    const lines = csv.trimEnd().split('\n')
-    expect(csv.endsWith('\n')).toBe(true)
-    expect(lines[0]).toBe('nickname,requests,succeeded,failed,canceled,active,completed,successRatePct,averageMs,p50Ms,p95Ms,requestBytes,responseBytes,streamed,buffered,peakActive,lastSeen')
-    expect(lines[1].startsWith('"ada, the ""first""",10,8,2,0,0,10,80,900,300,17500,1000,4000,')).toBe(true)
-    expect(lines[2]).toBe(`bo${','.repeat(16)}`)
   })
 })

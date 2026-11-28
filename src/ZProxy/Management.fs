@@ -203,14 +203,6 @@ module Management =
             writer.WriteStringValue("chat")
             writer.WriteStringValue("completions")
             writer.WriteEndArray()
-            // Storage is a process-wide fact, not a user measurement: the counters
-            // live in memory and flush to the private stats file every 5 seconds.
-            // No path, account state, or credential may appear here.
-            writer.WriteStartObject("store")
-            writer.WriteBoolean("available", true)
-            writer.WriteString("mode", "file")
-            writer.WriteNumber("keepHours", int Statistics.KeepHours)
-            writer.WriteEndObject()
             writer.WriteStartArray("users")
             for row in rows do
                 writer.WriteStartObject()

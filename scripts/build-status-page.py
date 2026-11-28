@@ -31,7 +31,7 @@ def main() -> None:
 
     if shutil.which("bun"):
         install = ["bun", "install", "--frozen-lockfile"]
-        build = ["bun", "x", "vite", "build"]
+        build = ["bunx", "vite", "build"]
     elif shutil.which("npm"):
         # No package-lock.json is committed, so `npm ci` cannot run.
         install = ["npm", "install", "--no-audit", "--no-fund"]
