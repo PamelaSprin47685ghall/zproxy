@@ -174,6 +174,12 @@ module ManagementTests =
         Assert.Equal(HttpStatusCode.OK, report.StatusCode)
         let! publicBody = text running report
         use document = JsonDocument.Parse(publicBody)
+        // Storage health is a process-wide fact, reported next to the rows rather
+        // than inside them, so the per-user key set below stays closed.
+        let store = document.RootElement.GetProperty("store")
+        Assert.True(store.GetProperty("available").GetBoolean())
+        Assert.Equal("file", store.GetProperty("mode").GetString())
+        Assert.Equal(24, store.GetProperty("keepHours").GetInt32())
         let row = document.RootElement.GetProperty("users")[0]
         Assert.Equal(nickname, row.GetProperty("nickname").GetString())
         Assert.Equal(1L, row.GetProperty("requests").GetInt64())

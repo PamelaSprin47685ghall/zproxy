@@ -129,3 +129,71 @@ describe('privacy', () => {
     expect(JSON.stringify(page.routing)).not.toContain('ada')
   })
 })
+
+describe('routing: schema v3 snapshot at the top level', () => {
+  const snapshot = {
+    schemaVersion: 3,
+    store: { mode: 'sqlite', available: true },
+    period: { id: 'peak', label: '高峰时段' },
+    catalog: { ready: true, workerReady: true, aggregateReady: true },
+    epoch: { id: 'e1', since: '2026-11-01T00:00:00Z' },
+    metrics: {
+      M01: { id: 'M01', label: '当前时段', value: '高峰时段', window: '当前时段', available: true },
+      M06: { label: '路由/模型', value: '1 条路由 · 2 个模型', window: '全局', available: true },
+    },
+    routes: [{
+      id: 'main', title: '主力路由', state: 'alive', available: 1, totalUnits: 2,
+      strategy: '按总耗时评分 · 带温度探索',
+      graph: { type: 'rating', label: '按总耗时评分 · 带温度探索', children: [
+        { type: 'model', model: 'gpt-x', effort: 'high', tier: 'premium' },
+        { type: 'model', model: 'gpt-y' },
+      ] },
+      channels: [{
+        id: 'main|gpt-x', model: 'gpt-x', effort: 'high', available: 1, totalUnits: 2,
+        perf: { M13: { id: 'M13', label: '预测总耗时', value: '2.5 s', available: true } },
+        units: [
+          { unitRef: 'u_aaa', displayName: 'provider-a', health: 'alive', capacity: { held: 1, max: 8, scope: 'unit' } },
+          { unitRef: 'u_bbb', displayName: 'provider-b', health: 'cooling', healthLabel: '冷却', reason: '429', capacity: null },
+        ],
+      }],
+    }],
+    tokenTotals: { available: true, totals: { uncachedInput: 100, cachedInput: 50, output: 25 } },
+    notices: [{ level: 'warning', code: 'worker_stale', title: '工作进程过期', message: '心跳过期', action: null }],
+  }
+
+  test('an unnested snapshot is read as routing instead of being dropped', () => {
+    const routing = normalize(snapshot).routing
+    expect(routing).not.toBeNull()
+    expect(routing.metrics).toHaveLength(2)
+    expect(routing.metrics.map((item) => item.id)).toEqual(['M01', 'M06'])
+    expect(routing.meta.map((row) => row.label)).toEqual(['存储', '时段', '目录', '纪元起点'])
+    expect(routing.notices).toHaveLength(1)
+  })
+
+  test('each route keeps its strategy graph, model channels and account units', () => {
+    const [route] = normalize(snapshot).routing.routes
+    expect(route.title).toBe('主力路由')
+    expect(route.strategy).toBe('按总耗时评分 · 带温度探索')
+    expect(route.graph.children.map((node) => node.label)).toEqual(['gpt-x', 'gpt-y'])
+    expect(route.graph.children[0].effort).toBe('high')
+    const [channel] = route.channels
+    expect(channel.model).toBe('gpt-x')
+    expect(channel.effort).toBe('high')
+    expect(channel.metrics.M13.value).toBe('2.5 s')
+    expect(channel.units.map((unit) => unit.displayName)).toEqual(['provider-a', 'provider-b'])
+    expect(channel.units[1].healthLabel).toBe('冷却')
+    expect(channel.units[1].reason).toBe('429')
+    expect(channel.units[0].capacity.held).toBe(1)
+  })
+
+  test('a missing route list is null, an empty one is empty', () => {
+    expect(normalize({ ...snapshot, routes: undefined }).routing.routes).toBeNull()
+    expect(normalize({ ...snapshot, routes: [] }).routing.routes).toEqual([])
+  })
+
+  test('unit handles never replace the display name', () => {
+    const routing = normalize(snapshot).routing
+    expect(JSON.stringify(routing.routes.map((route) => route.channels.map((channel) => channel.units.map((unit) => unit.displayName))))) .not.toContain('u_aaa')
+  })
+})
+
